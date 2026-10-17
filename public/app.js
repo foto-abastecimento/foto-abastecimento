@@ -171,7 +171,7 @@ function limparTudo(){
   $("#capActions").hidden = false; $("#revActions").hidden = true;
   ["#fCliente","#fNota","#fDestNome","#fDestDoc"].forEach(s => $(s).value = "");
   $("#fPdf").value = ""; $("#destBox").hidden = true;
-  mostraNF("wait","Anexe o PDF da nota (DANFE ou NFC-e). O sistema confere o número e o horário de emissão.");
+  mostraNF("wait","Anexe o PDF da nota (DANFE ou NFC-e). O sistema confere o número e o horário da nota (hora da saída).");
   showMsg($("#capMsg"), ""); mostraAlertaHorario(null);
   atualizaBotao();
 }
@@ -279,7 +279,39 @@ function valorAbaixoRotulo(itens, re){
   linha.sort((a,b) => Math.abs(a.x+a.w/2-centro) - Math.abs(b.x+b.w/2-centro));
   return linha.length ? linha[0].s : "";
 }
+/* Horário da nota: campo HORA DA SAÍDA do DANFE (data da saída, ou da emissão se a da saída estiver vazia).
+   O valor fica logo abaixo do rótulo, na mesma coluna; só aceita um horário válido (hh:mm ou hh:mm:ss). */
+const RE_ROT_HSAIDA = /HORA\s+(?:D[AE]\s+)?SA\S{0,3}DA/i;
+const RE_ROT_DSAIDA = /DATA\s+(?:D[AE]\s+)?SA\S{0,3}DA/i;
+const RE_ROT_DEMIS = /DATA\s+(?:D[AE]\s+)?EMISS/i;
+function valorNaColuna(itens, re, padrao){
+  const pg = itens.filter(i => i.p === 1);
+  for (const rot of pg.filter(i => re.test(i.s))){
+    const centro = rot.x + rot.w/2, folga = Math.max(40, rot.w);
+    const cand = pg.filter(i => i !== rot && i.y < rot.y - 0.5 && rot.y - i.y <= Math.max(22, rot.h*4) && Math.abs(i.x + i.w/2 - centro) <= folga && padrao.test(i.s))
+      .sort((a,b) => (b.y - a.y) || (Math.abs(a.x+a.w/2-centro) - Math.abs(b.x+b.w/2-centro)));
+    if (cand.length) return cand[0].s.match(padrao);
+  }
+  return null;
+}
+function horaValida(h, mi, s){ return +h <= 23 && +mi <= 59 && (s === undefined || +s <= 59); }
+function acharHoraSaida(texto, itens){
+  const t = texto.replace(/\s+/g," ");
+  const RE_H = /(\d{2}):(\d{2})(?::(\d{2}))?/, RE_D = /(\d{2})\/(\d{2})\/(\d{4})/;
+  let h = valorNaColuna(itens, RE_ROT_HSAIDA, RE_H);
+  if (!h){ const m = t.match(/HORA\s+(?:D[AE]\s+)?SA\S{0,3}DA\s*:?\s*(\d{2}):(\d{2})(?::(\d{2}))?/i); if (m) h = m; }
+  if (!h || !horaValida(h[1], h[2], h[3])) return null;
+  let d = valorNaColuna(itens, RE_ROT_DSAIDA, RE_D) || valorNaColuna(itens, RE_ROT_DEMIS, RE_D);
+  if (!d) d = t.match(/DATA\s+(?:D[AE]\s+)?SA\S{0,3}DA(?:\s*\/\s*ENTRADA)?\s*:?\s*(\d{2})\/(\d{2})\/(\d{4})/i) || t.match(/EMISS[ÃA]O[^\d]{0,40}?(\d{2})\/(\d{2})\/(\d{4})/i);
+  if (!d) return null;
+  const r = montaData(d[1], d[2], d[3], h[1], h[2], h[3]);
+  return r ? { ...r, fonte: "hora da saída" } : null;
+}
 function acharEmissao(texto, itens){
+  // 1º: HORA DA SAÍDA do DANFE (regra definida pela matriz)
+  const saida = acharHoraSaida(texto, itens);
+  if (saida) return saida;
+  // reservas: notas sem esse campo preenchido (ex.: NFC-e)
   const t = texto.replace(/\s+/g," ");
   let m = t.match(new RegExp("EMISS[ÃA]O[^\\d]{0,40}?" + RE_DT, "i"));
   if (m){ const r = montaData(...m.slice(1)); if (r) return { ...r, fonte: "data/hora de emissão impressa" }; }
@@ -331,7 +363,7 @@ function conferirNF(){
   const dig = numInt($("#fNota").value);
   nf.confere = !!dig && dig === nf.numero;
   const det = [`Lido no PDF (${nf.origem}): nota ${nf.numero}` + (nf.serie ? `, série ${nf.serie}` : "") + (nf.modelo ? `, ${nf.modelo}` : "")];
-  det.push(nf.emissao ? `Emitida em ${nf.emissao.texto} (${nf.emissao.fonte})` : "Horário de emissão não encontrado no PDF.");
+  det.push(nf.emissao ? `Horário da nota: ${nf.emissao.texto} (${nf.emissao.fonte})` : "Horário da nota (hora da saída) não encontrado no PDF.");
   if (nf.cnpjEmit){
     det.push(`CNPJ emitente: ${maskCNPJ(nf.cnpjEmit)}`);
     if (posto && nf.cnpjEmit !== posto.cnpj) det.push(`Atenção: o emitente é diferente do CNPJ deste posto (${maskCNPJ(posto.cnpj)}).`);
@@ -345,10 +377,10 @@ $("#fPdf").addEventListener("change", e => { const f = e.target.files && e.targe
 /* ----- conferência de horário e alerta para a matriz ----- */
 function verificaHorario(){
   if (!pendente || !nf) return null;
-  if (!nf.emissao) return { ok:false, tipo:"horario_nao_lido", titulo:"Não foi possível ler o horário de emissão da nota.", det:"Sem esse horário o sistema não consegue conferir a nota com a foto." };
+  if (!nf.emissao) return { ok:false, tipo:"horario_nao_lido", titulo:"Não foi possível ler o horário da nota (hora da saída).", det:"Sem esse horário o sistema não consegue conferir a nota com a foto." };
   const dif = Math.abs(pendente.capturadoMs - nf.emissao.ms) / 60000;
   const difTxt = dif < 60 ? `${Math.round(dif)} min` : `${Math.floor(dif/60)} h ${Math.round(dif%60)} min`;
-  if (dif > LIMITE_MIN) return { ok:false, tipo:"atraso", dif, titulo:`Diferença de ${difTxt} entre a emissão da nota e a foto.`, det:`Emissão: ${nf.emissao.texto} (${nf.emissao.fonte}). Foto: ${pendente.brasilia}. Limite: ${LIMITE_MIN} min.` };
+  if (dif > LIMITE_MIN) return { ok:false, tipo:"atraso", dif, titulo:`Diferença de ${difTxt} entre o horário da nota e a foto.`, det:`Nota: ${nf.emissao.texto} (${nf.emissao.fonte}). Foto: ${pendente.brasilia}. Limite: ${LIMITE_MIN} min.` };
   return { ok:true, dif };
 }
 function mostraAlertaHorario(v){
@@ -495,7 +527,7 @@ function montaItem(f, ehAdmin){
   partes.push(`Motorista: ${f.cliente}`);
   meta.appendChild(document.createTextNode(partes.join(" · ")));
   const chip = document.createElement("span"); chip.className = "chip"; chip.textContent = "NF conferida";
-  chip.title = [`Emissão ${f.nf_emissao || "?"}`, f.dif_min != null ? `diferença ${f.dif_min} min` : "", f.dest_origem === "editado à mão" ? "cliente corrigido à mão" : ""].filter(Boolean).join(" · ");
+  chip.title = [`Horário da nota ${f.nf_emissao || "?"}`, f.dif_min != null ? `diferença ${f.dif_min} min` : "", f.dest_origem === "editado à mão" ? "cliente corrigido à mão" : ""].filter(Boolean).join(" · ");
   meta.appendChild(chip);
   const ver = () => { $("#viewImg").src = src; $("#viewName").textContent = ehAdmin ? f.arquivo : `${f.dest_nome || f.cliente} · ${f.capturado_txt}`; $("#viewImg").oncontextmenu = ehAdmin ? null : (e => e.preventDefault()); $("#viewer").hidden = false; };
   img.onclick = ver; el.querySelector('[data-a="ver"]').onclick = ver;
@@ -607,8 +639,8 @@ async function listarAlertas(){
       el.querySelector(".mono").textContent = criado;
       el.querySelector(".d1").textContent = `Nota ${a.nota || "?"} · Motorista: ${a.cliente || "?"}`;
       el.querySelector(".d2").textContent = a.tipo === "atraso"
-        ? `Emissão ${a.emissao || "?"} · Foto ${a.foto_em || "?"} · Diferença ${a.dif_min != null ? a.dif_min + " min" : "?"}${a.emissao_fonte ? " (" + a.emissao_fonte + ")" : ""}`
-        : `Foto ${a.foto_em || "?"} · horário de emissão não encontrado no PDF`;
+        ? `Horário da nota ${a.emissao || "?"} · Foto ${a.foto_em || "?"} · Diferença ${a.dif_min != null ? a.dif_min + " min" : "?"}${a.emissao_fonte ? " (" + a.emissao_fonte + ")" : ""}`
+        : `Foto ${a.foto_em || "?"} · horário da nota não encontrado no PDF`;
       const row = el.querySelector(".row:last-child");
       if (a.visto){ const s = document.createElement("span"); s.className = "hint"; s.textContent = "Visto em " + brtTexto(brt(new Date(a.visto_em))); row.appendChild(s); }
       else { const b = document.createElement("button"); b.textContent = "Marcar como visto"; b.onclick = async () => { b.disabled = true; try { await api(`/api/alertas/${a.id}`, { method:"PUT", body:{ visto:true } }); listarAlertas(); } catch (e) { b.disabled = false; alertaErro(row, e.message); } }; row.appendChild(b); }

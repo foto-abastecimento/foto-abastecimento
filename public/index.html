@@ -77,7 +77,7 @@
         <button id="btnSalvar" class="primary" style="flex:1" disabled>Salvar foto e nota</button>
         <button id="btnRefazer" style="flex:1">Descartar e refazer</button>
       </div>
-      <p class="hint" style="margin:0">Para salvar: cliente/motorista, número da nota, PDF da nota com o mesmo número e emissão até 10 minutos antes ou depois da foto.</p>
+      <p class="hint" style="margin:0">Para salvar: cliente/motorista, número da nota, PDF da nota com o mesmo número e hora da saída da nota até 10 minutos antes ou depois da foto.</p>
     </section>
   </main>
 
@@ -141,7 +141,7 @@
         <h2>Alertas de erros</h2>
         <label class="check"><input type="checkbox" id="alTodos"> Mostrar também os já vistos</label>
       </div>
-      <p class="hint" style="margin:0">Tentativas bloqueadas por horário: nota emitida mais de 10 minutos antes ou depois da foto, ou nota sem horário de emissão legível. Número de nota digitado errado não gera alerta.</p>
+      <p class="hint" style="margin:0">Tentativas bloqueadas por horário: hora da saída da nota mais de 10 minutos antes ou depois da foto, ou nota sem horário legível. Número de nota digitado errado não gera alerta.</p>
       <div class="list" id="alLista"></div>
     </section>
 
