@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Foto Abastecimento</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@600;700&family=JetBrains+Mono:wght@500;700&display=swap">
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+</head>
+<body>
+
+<div id="carregando" class="carregando">Carregando…</div>
+
+<!-- ============ LOGIN ============ -->
+<section id="login" class="gut" hidden>
+  <div class="login-card">
+    <div class="brand"><div class="pump" aria-hidden="true">F</div><h1>Foto Abastecimento</h1></div>
+    <p class="hint" style="margin:0 0 18px">Registro fotográfico de abastecimento. O acesso de cada posto é criado pela matriz.</p>
+    <form id="fEntrar" class="stack" autocomplete="off">
+      <div><label for="lUsuario">CNPJ do posto</label><input id="lUsuario" class="mono" placeholder="00.000.000/0000-00" autocapitalize="none" required></div>
+      <div><label for="lSenha">Senha</label><input id="lSenha" type="password" required></div>
+      <div id="lMsg" class="msg err" hidden></div>
+      <button class="primary big" type="submit" id="lBtn">Entrar</button>
+    </form>
+  </div>
+</section>
+
+<!-- ============ PORTAL DO POSTO ============ -->
+<section id="posto" hidden>
+  <header class="top gut">
+    <div class="top-in">
+      <div class="store"><b id="hNome">—</b><span class="mono hint" id="hCnpj">—</span></div>
+      <div class="clock">Horário de Brasília: <span class="mono clockTxt">--/--/---- --:--:--</span></div>
+      <button class="sair">Sair</button>
+    </div>
+  </header>
+
+  <main class="posto-main gut">
+    <section class="cam-col">
+      <div class="cam">
+        <video id="video" autoplay playsinline muted></video>
+        <img id="preview" alt="Foto capturada com carimbo" hidden>
+        <div class="off" id="camOff">Ligando a câmera… Se o navegador perguntar, permita o acesso.</div>
+      </div>
+      <div class="row cam-ctrl">
+        <button id="btnCam">Ligar câmera</button>
+        <select id="camSel" aria-label="Escolher câmera" hidden></select>
+      </div>
+    </section>
+
+    <section class="form-col panel stack">
+      <div class="fields">
+        <div><label for="fCliente">Cliente / motorista</label><input id="fCliente" maxlength="60" placeholder="Nome do cliente ou motorista"></div>
+        <div><label for="fNota">Número da nota</label><input id="fNota" class="mono" maxlength="20" inputmode="numeric" placeholder="Ex.: 004512"></div>
+      </div>
+
+      <div class="nf">
+        <div><label for="fPdf">Nota fiscal (PDF)</label><input id="fPdf" type="file" accept="application/pdf,.pdf"></div>
+        <div id="nfRes" class="nfres wait"></div>
+        <div id="destBox" class="stack" hidden>
+          <div class="hint" id="destOrigem"></div>
+          <div class="fields">
+            <div><label for="fDestNome">Cliente da nota (nome / razão social)</label><input id="fDestNome" maxlength="100"></div>
+            <div><label for="fDestDoc">CNPJ / CPF do cliente</label><input id="fDestDoc" class="mono" maxlength="18" placeholder="Em branco se não identificado"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="alertaMatriz" class="alerta" role="alert" hidden></div>
+      <div id="capMsg" class="msg" hidden></div>
+
+      <div id="capActions"><button id="btnFoto" class="primary big" disabled>Tirar foto</button></div>
+      <div id="revActions" class="row" hidden>
+        <button id="btnSalvar" class="primary" style="flex:1" disabled>Salvar foto e nota</button>
+        <button id="btnRefazer" style="flex:1">Descartar e refazer</button>
+      </div>
+      <p class="hint" style="margin:0">Para salvar: cliente/motorista, número da nota, PDF da nota com o mesmo número e emissão até 10 minutos antes ou depois da foto.</p>
+    </section>
+  </main>
+
+  <div class="barra-banco gut">
+    <button id="btnAbrirBanco"><span>Banco de fotos</span> <span class="badge-n" id="nFotosPosto">0</span></button>
+  </div>
+</section>
+
+<!-- Banco do posto (só visualização) -->
+<div id="drawer" class="drawer" hidden>
+  <div class="drawer-in">
+    <div class="row" style="justify-content:space-between">
+      <h2>Banco de fotos</h2>
+      <button id="btnFecharBanco">Fechar</button>
+    </div>
+    <input id="pBusca" placeholder="Buscar por cliente, CNPJ/CPF, nota ou motorista" aria-label="Buscar">
+    <div class="filtros">
+      <div><label for="pMes">Mês</label><select id="pMes"><option value="">Todos</option></select></div>
+      <div><label for="pCli">Cliente da nota</label><select id="pCli"><option value="">Todos</option></select></div>
+      <div><label for="pTipo">Tipo de cliente</label><select id="pTipo"><option value="">Todos</option><option value="PJ">Pessoa jurídica (CNPJ)</option><option value="PF">Pessoa física (CPF)</option><option value="NI">Não identificado</option></select></div>
+    </div>
+    <div class="row" style="justify-content:space-between"><span class="count" id="pCount"></span><button id="pLimpar">Limpar filtros</button></div>
+    <div class="list" id="pLista"></div>
+  </div>
+</div>
+
+<!-- ============ PORTAL DA MATRIZ ============ -->
+<section id="admin" hidden>
+  <header class="top gut">
+    <div class="top-in">
+      <div class="store"><b>Portal da matriz</b><span class="hint">Acesso administrador</span></div>
+      <nav class="abas" role="tablist">
+        <button role="tab" data-aba="fotos" aria-selected="true">Fotos</button>
+        <button role="tab" data-aba="alertas" aria-selected="false">Alertas <span class="badge-n alerta-n" id="nAlertas" hidden>0</span></button>
+        <button role="tab" data-aba="postos" aria-selected="false">Postos</button>
+      </nav>
+      <button class="sair">Sair</button>
+    </div>
+  </header>
+  <div id="avisoSenha" class="aviso gut" hidden>A senha do admin ainda é a padrão (“admin”). Defina a variável ADMIN_PASSWORD no Railway (veja o README).</div>
+
+  <main class="admin-main gut">
+    <section class="panel stack" data-painel="fotos">
+      <div class="row" style="justify-content:space-between"><h2>Fotos de todos os postos</h2><span class="count" id="aCount"></span></div>
+      <input id="aBusca" placeholder="Buscar por cliente, CNPJ/CPF, nota, motorista ou posto" aria-label="Buscar">
+      <div class="filtros">
+        <div><label for="aPosto">Posto</label><select id="aPosto"><option value="">Todos</option></select></div>
+        <div><label for="aCli">Cliente da nota</label><select id="aCli"><option value="">Todos</option></select></div>
+        <div><label for="aTipo">Tipo de cliente</label><select id="aTipo"><option value="">Todos</option><option value="PJ">Pessoa jurídica (CNPJ)</option><option value="PF">Pessoa física (CPF)</option><option value="NI">Não identificado</option></select></div>
+        <div><label for="aDe">Data de</label><input id="aDe" type="date"></div>
+        <div><label for="aAte">Data até</label><input id="aAte" type="date"></div>
+        <div class="fim"><button id="aLimpar">Limpar filtros</button></div>
+      </div>
+      <div class="row"><button id="aZip" class="primary">Baixar resultado (.zip)</button><span class="hint" id="aZipInfo"></span></div>
+      <div id="aMsg" class="msg" hidden></div>
+      <div class="list grade" id="aLista"></div>
+    </section>
+
+    <section class="panel stack" data-painel="alertas" hidden>
+      <div class="row" style="justify-content:space-between">
+        <h2>Alertas de erros</h2>
+        <label class="check"><input type="checkbox" id="alTodos"> Mostrar também os já vistos</label>
+      </div>
+      <p class="hint" style="margin:0">Tentativas bloqueadas por horário: nota emitida mais de 10 minutos antes ou depois da foto, ou nota sem horário de emissão legível. Número de nota digitado errado não gera alerta.</p>
+      <div class="list" id="alLista"></div>
+    </section>
+
+    <section class="panel stack" data-painel="postos" hidden>
+      <h2>Postos cadastrados</h2>
+      <form id="fNovoPosto" class="stack nf" autocomplete="off">
+        <b>Cadastrar posto</b>
+        <div class="fields3">
+          <div><label for="nCnpj">CNPJ do posto</label><input id="nCnpj" class="mono" placeholder="00.000.000/0000-00" required></div>
+          <div><label for="nNome">Nome do posto</label><input id="nNome" maxlength="60" required></div>
+          <div><label for="nSenha">Senha de acesso</label><input id="nSenha" type="text" minlength="4" required autocomplete="off"></div>
+        </div>
+        <div><button class="primary" type="submit">Cadastrar posto</button></div>
+        <div id="nMsg" class="msg" hidden></div>
+      </form>
+      <div class="list" id="psLista"></div>
+    </section>
+  </main>
+</section>
+
+<div class="viewer" id="viewer" hidden><img id="viewImg" alt="Foto ampliada"><span class="mono" id="viewName"></span><button id="viewClose">Fechar</button></div>
+
+<script src="app.js"></script>
+</body>
+</html>
