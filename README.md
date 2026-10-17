@@ -61,12 +61,14 @@ Roda num único servidor Node.js, sem dependências externas. O banco é SQLite 
   - o IP do envio sai no carimbo da foto e fica gravado;
   - atrás do proxy do Railway, vale o último IP público do `X-Forwarded-For`;
   - o IP é o da internet do posto, não o de cada computador.
-- **Semáforo de IP** na aba Alertas, olhando os últimos 5 envios de cada posto:
-  - **verde:** mesmo IP em pelo menos 3 envios;
-  - **vermelho:** o IP mudou;
-  - **cinza:** poucos envios para avaliar.
-
-  Cada troca de IP gera um alerta, sem bloquear o posto.
+- **Controle de IP pelo login do posto.**
+  - Cada login do posto fica registrado com IP, data e navegador. Senha errada não conta.
+  - A aba Alertas mostra um semáforo com os últimos 5 logins de cada posto:
+    - **verde:** mesmo IP em pelo menos 3 logins seguidos;
+    - **vermelho:** o IP mudou;
+    - **cinza:** poucos logins para avaliar (o primeiro acesso não conta).
+  - Um login de IP diferente do anterior gera alerta, sem bloquear o posto.
+  - O envio da foto continua gravando o IP. Se ele for diferente do IP do login, a diferença fica anotada no registro.
 - **Hash SHA-256:** a foto e a nota recebem uma impressão digital no envio. Ela aparece na matriz e no relatório e prova que o arquivo não foi alterado depois.
 - **Alertas com foto:** tentativas bloqueadas por horário guardam a foto e o PDF, que a matriz pode abrir.
 - **Usuários de consulta:** criados pelo admin na aba Usuários.

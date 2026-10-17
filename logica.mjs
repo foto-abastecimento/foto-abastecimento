@@ -13,8 +13,8 @@ const LIMITE_ENVIO_MIN = 20;     // diferença máxima entre a foto e a chegada 
 const MAX_FOTO = 8 * 1024 * 1024;
 const MAX_PDF = 10 * 1024 * 1024;
 const SESSAO_HORAS = 12;
-const JANELA_IP = 5;             // semáforo de IP: últimos 5 envios
-const MIN_IP_VERDE = 3;          // pelo menos 3 envios no mesmo IP para ficar verde
+const JANELA_IP = 5;             // semáforo de IP: últimos 5 logins do posto
+const MIN_IP_VERDE = 3;          // pelo menos 3 logins no mesmo IP para ficar verde
 const BR_OFFSET_MS = -3 * 3600 * 1000; // Brasília, UTC-3 (sem horário de verão desde 2019)
 
 /* ---------- utilitários ---------- */
@@ -117,6 +117,10 @@ function preparar(env) {
           emissao TEXT, emissao_fonte TEXT, foto_em TEXT, dif_min REAL, detalhe TEXT, criado_em TEXT NOT NULL,
           visto INTEGER NOT NULL DEFAULT 0, visto_em TEXT)`),
         env.DB.prepare(`CREATE INDEX IF NOT EXISTS ix_alertas ON alertas(visto, criado_em)`),
+        env.DB.prepare(`CREATE TABLE IF NOT EXISTS acessos (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, posto_id INTEGER NOT NULL, ip TEXT, navegador TEXT,
+          cnpj_na_epoca TEXT, criado_em TEXT NOT NULL)`),
+        env.DB.prepare(`CREATE INDEX IF NOT EXISTS ix_acessos_posto ON acessos(posto_id, id)`),
         env.DB.prepare(`CREATE TABLE IF NOT EXISTS usuarios (
           id INTEGER PRIMARY KEY AUTOINCREMENT, usuario TEXT NOT NULL UNIQUE, nome TEXT NOT NULL,
           senha_hash TEXT NOT NULL, salt TEXT NOT NULL, papel TEXT NOT NULL DEFAULT 'consulta',
@@ -200,7 +204,8 @@ function lerNotaNoServidor(env, bytesNf) {
 const TIPOS_ALERTA = {
   atraso: "Nota fora do horário",
   horario_nao_lido: "Horário da nota não lido",
-  ip_alterado: "IP diferente do envio anterior"
+  ip_login: "Login de IP diferente do anterior",
+  ip_alterado: "IP diferente do envio anterior" // tipo antigo, mantido para o histórico
 };
 async function guardarArquivosAlerta(env, postoId, arq) {
   if (!arq || !arq.foto) return {};
@@ -214,7 +219,7 @@ async function registrarAlerta(env, postoId, a, arquivos) {
   if (!TIPOS_ALERTA[a.tipo]) return;
   const nota = String(a.nota || "").slice(0, 20);
   // mesmo posto, tipo e nota em 30 minutos = mesmo alerta (só completa a foto se faltar)
-  if (a.tipo !== "ip_alterado") {
+  if (a.tipo !== "ip_alterado" && a.tipo !== "ip_login") {
     const limite = new Date(Date.now() - 30 * 60e3).toISOString();
     const ja = await env.DB.prepare("SELECT id, chave_foto FROM alertas WHERE posto_id = ? AND tipo = ? AND nota = ? AND criado_em > ?")
       .bind(postoId, a.tipo, nota, limite).first();
@@ -236,20 +241,31 @@ async function registrarAlerta(env, postoId, a, arquivos) {
     g.chave_foto || null, g.chave_nf || null, g.hash_foto || null, g.hash_nf || null, corta(a.origem, 30)).run();
 }
 
-/* Semáforo de IP por posto: últimos 5 envios com IP registrado */
+/* Semáforo de IP por posto: últimos 5 logins do posto */
 async function semaforoIP(env) {
   const postos = (await env.DB.prepare("SELECT id, nome, cnpj FROM postos ORDER BY nome COLLATE NOCASE").all()).results;
   const res = [];
   for (const p of postos) {
-    const ult = (await env.DB.prepare("SELECT ip, capturado_txt FROM fotos WHERE posto_id = ? AND ip IS NOT NULL AND ip <> '' ORDER BY id DESC LIMIT ?").bind(p.id, JANELA_IP).all()).results;
+    const ult = (await env.DB.prepare("SELECT ip, criado_em FROM acessos WHERE posto_id = ? AND ip IS NOT NULL AND ip <> '' ORDER BY id DESC LIMIT ?").bind(p.id, JANELA_IP).all()).results
+      .map(u => ({ ip: u.ip, quando: brasilia(Date.parse(u.criado_em)).texto }));
     const ips = [...new Set(ult.map(u => u.ip))];
-    let cor = "cinza", texto = "Histórico insuficiente (menos de 2 envios com IP)";
-    if (ult.length >= 2 && ips.length > 1) { cor = "vermelho"; texto = `IP mudou nos últimos ${ult.length} envios`; }
-    else if (ult.length >= MIN_IP_VERDE && ips.length === 1) { cor = "verde"; texto = `Mesmo IP nos últimos ${ult.length} envios`; }
-    else if (ult.length === 2 && ips.length === 1) { cor = "cinza"; texto = "Mesmo IP, mas só 2 envios até agora"; }
-    res.push({ posto_id: p.id, posto_nome: p.nome, posto_cnpj: p.cnpj, cor, texto, envios: ult, ips });
+    let cor = "cinza", texto = ult.length ? "Histórico insuficiente: só 1 login registrado (primeiro acesso não conta)" : "Nenhum login registrado ainda";
+    if (ult.length >= 2 && ips.length > 1) { cor = "vermelho"; texto = `IP mudou nos últimos ${ult.length} logins`; }
+    else if (ult.length >= MIN_IP_VERDE && ips.length === 1) { cor = "verde"; texto = `Mesmo IP nos últimos ${ult.length} logins`; }
+    else if (ult.length === 2 && ips.length === 1) { cor = "cinza"; texto = "Mesmo IP, mas só 2 logins até agora"; }
+    res.push({ posto_id: p.id, posto_nome: p.nome, posto_cnpj: p.cnpj, cor, texto, logins: ult, ips });
   }
   return res;
+}
+
+/* Registra cada login do posto e alerta quando o IP é diferente do login anterior (sem bloquear) */
+async function registrarAcesso(env, request, p) {
+  const ip = ipCliente(request);
+  const anterior = await env.DB.prepare("SELECT ip FROM acessos WHERE posto_id = ? AND ip IS NOT NULL AND ip <> '' ORDER BY id DESC LIMIT 1").bind(p.id).first();
+  await env.DB.prepare("INSERT INTO acessos (posto_id, ip, navegador, cnpj_na_epoca, criado_em) VALUES (?, ?, ?, ?, ?)")
+    .bind(p.id, ip, corta(request.headers.get("user-agent"), 200), p.cnpj, agoraISO()).run();
+  if (anterior && anterior.ip !== ip)
+    await registrarAlerta(env, p.id, { tipo: "ip_login", ip, ipAnterior: anterior.ip, origem: "login", detalhe: "Login aceito; IP diferente do login anterior." });
 }
 
 /* ---------- rotas ---------- */
@@ -280,6 +296,7 @@ async function api(request, env, url) {
     if (!validCNPJ(cnpj)) return erro("Usuário ou CNPJ inválido.", 400);
     const p = await env.DB.prepare("SELECT * FROM postos WHERE cnpj = ?").bind(cnpj).first();
     if (!p || !iguais(await hashSenha(String(senha), p.salt), p.senha_hash)) return erro("CNPJ ou senha incorretos. Se esqueceu a senha, fale com a matriz.", 401);
+    await registrarAcesso(env, request, p);
     return json({ papel: "posto" }, 200, { "set-cookie": await criarSessao(env, { r: "posto", pid: p.id, s: p.salt.slice(0, 12) }) });
   }
 
@@ -385,9 +402,11 @@ async function api(request, env, url) {
     if (!s.matriz) return erro("Acesso só da matriz.", 403);
     const r = await env.DB.prepare(`SELECT p.id, p.cnpj, p.nome, p.criado_em, p.atualizado_em,
       (SELECT COUNT(*) FROM fotos f WHERE f.posto_id = p.id) AS fotos,
-      (SELECT COUNT(*) FROM alertas a WHERE a.posto_id = p.id AND a.visto = 0) AS alertas
+      (SELECT COUNT(*) FROM alertas a WHERE a.posto_id = p.id AND a.visto = 0) AS alertas,
+      (SELECT ip FROM acessos x WHERE x.posto_id = p.id ORDER BY x.id DESC LIMIT 1) AS ultimo_ip,
+      (SELECT criado_em FROM acessos x WHERE x.posto_id = p.id ORDER BY x.id DESC LIMIT 1) AS ultimo_login
       FROM postos p ORDER BY p.nome COLLATE NOCASE`).all();
-    return json({ postos: r.results });
+    return json({ postos: r.results.map(p => ({ ...p, ultimo_login_txt: p.ultimo_login ? brasilia(Date.parse(p.ultimo_login)).texto : null })) });
   }
   if (caminho.startsWith("/api/postos") && !s.admin) return erro("Só o administrador altera postos.", 403);
   if (caminho === "/api/postos" && metodo === "POST") {
@@ -527,6 +546,8 @@ async function receberFoto(request, env, posto) {
     emissao = Number.isFinite(+n.emissaoMs) ? { ms: +n.emissaoMs, fonte: n.emissaoFonte || "" } : null;
   }
   if (ipCarimbo && ipCarimbo !== ip) divergencias.push(`IP no carimbo ${ipCarimbo}, IP do envio ${ip}`);
+  const ultimoLogin = await env.DB.prepare("SELECT ip FROM acessos WHERE posto_id = ? ORDER BY id DESC LIMIT 1").bind(posto.id).first();
+  if (ultimoLogin && ultimoLogin.ip && ultimoLogin.ip !== ip) divergencias.push(`IP do envio ${ip} diferente do IP do login ${ultimoLogin.ip}`);
 
   if (numInt(nota) !== numeroNota) return erro(`O número da nota no PDF${lido ? ` (${numeroNota})` : ""} precisa ser igual ao número digitado.`, 422);
 
@@ -557,9 +578,6 @@ async function receberFoto(request, env, posto) {
   await env.FILES.put(chaveFoto, bytesFoto, { httpMetadata: { contentType: "image/jpeg" } });
   await env.FILES.put(chaveNf, bytesNf, { httpMetadata: { contentType: "application/pdf" } });
 
-  // IP do envio anterior deste posto (para o alerta de IP alterado)
-  const anterior = await env.DB.prepare("SELECT ip FROM fotos WHERE posto_id = ? AND ip IS NOT NULL AND ip <> '' ORDER BY id DESC LIMIT 1").bind(posto.id).first();
-
   const tipo = destDoc.length === 14 ? "PJ" : destDoc.length === 11 ? "PF" : "NI";
   await env.DB.prepare(`INSERT INTO fotos (posto_id, cliente, nota, arquivo, arquivo_nf, chave_foto, chave_nf, capturado_em, capturado_txt, cap_dia, recebido_em,
       dest_nome, dest_doc, dest_tipo, dest_origem, nf_numero, nf_serie, nf_modelo, nf_cnpj_emit, nf_emissao, nf_emissao_fonte, dif_min, cnpj_na_epoca, nome_na_epoca,
@@ -572,9 +590,6 @@ async function receberFoto(request, env, posto) {
     Math.round(dif * 10) / 10, posto.cnpj, posto.nome,
     ip, ipCarimbo, hashFoto, hashNf, verif, lido && lido.chave ? lido.chave : null, divergencias.length ? divergencias.join("; ").slice(0, 500) : null,
     lido && lido.dest ? corta(lido.dest.nome, 100) : null, lido && lido.dest ? corta(lido.dest.doc, 14) : null).run();
-
-  if (anterior && anterior.ip && anterior.ip !== ip)
-    await registrarAlerta(env, posto.id, { tipo: "ip_alterado", nota, cliente, fotoEm: capBR.texto, ip, ipAnterior: anterior.ip, origem: "servidor", detalhe: "Envio aceito; IP diferente do envio anterior." });
 
   return json({ ok: true, arquivo, arquivoNf, hashFoto, verificacao: verif });
 }

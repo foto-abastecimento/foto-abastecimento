@@ -587,24 +587,26 @@ async function listarAlertas(){
       el.querySelector(".luz").title = x.cor === "verde" ? "Sem alteração de IP" : x.cor === "vermelho" ? "IP alterado" : "Histórico insuficiente";
       el.querySelector(".pn").textContent = `${x.posto_nome} · CNPJ ${maskCNPJ(x.posto_cnpj)}`;
       el.querySelector(".tx").textContent = x.texto;
-      el.querySelector(".ips").textContent = x.envios.map(e => `${e.ip} (${e.capturado_txt})`).join("  ·  ");
+      el.querySelector(".ips").textContent = x.logins.map(e => `${e.ip} (${e.quando})`).join("  ·  ");
       sem.appendChild(el);
     });
     // alertas
     lista.innerHTML = "";
     if (!r.alertas.length){ lista.innerHTML = `<div class="empty">Nenhum alerta ${$("#alTodos").checked ? "registrado" : "em aberto"}.</div>`; return; }
     r.alertas.forEach(a => {
-      const el = document.createElement("div"); el.className = "al" + (a.visto ? " visto" : "") + (a.tipo === "ip_alterado" ? " ip" : "");
+      const ehIP = a.tipo === "ip_alterado" || a.tipo === "ip_login";
+      const el = document.createElement("div"); el.className = "al" + (a.visto ? " visto" : "") + (ehIP ? " ip" : "");
       el.innerHTML = `<div class="al-corpo"><div class="al-texto"><div class="row" style="justify-content:space-between"><div><span class="chip erro"></span> <b class="pn"></b></div><span class="mono hint quando"></span></div><div class="det d1"></div><div class="det d2"></div><div class="det d3"></div><div class="row acoes"></div></div></div>`;
       el.querySelector(".chip").textContent = a.tipo_txt;
       el.querySelector(".pn").textContent = `${a.posto_nome || "Posto"} · CNPJ ${maskCNPJ(a.posto_cnpj || "")}`;
       el.querySelector(".quando").textContent = "Registrado em " + brtTexto(brt(new Date(a.criado_em)));
-      el.querySelector(".d1").textContent = `Nota ${a.nota || "?"} · Motorista: ${a.cliente || "?"} · Foto: ${a.foto_em || "?"}`;
+      el.querySelector(".d1").textContent = a.tipo === "ip_login" ? "Login do posto" : `Nota ${a.nota || "?"} · Motorista: ${a.cliente || "?"} · Foto: ${a.foto_em || "?"}`;
       el.querySelector(".d2").textContent = a.tipo === "atraso"
         ? `Horário da nota ${a.emissao || "?"} · Diferença ${a.dif_min != null ? a.dif_min + " min" : "?"}${a.emissao_fonte ? " (" + a.emissao_fonte + ")" : ""}`
+        : a.tipo === "ip_login" ? `IP do login anterior ${a.ip_anterior || "?"} → IP deste login ${a.ip || "?"} (acesso liberado)`
         : a.tipo === "ip_alterado" ? `IP anterior ${a.ip_anterior || "?"} → IP deste envio ${a.ip || "?"} (envio aceito)`
         : "Horário da nota (hora da saída) não encontrado no PDF";
-      el.querySelector(".d3").textContent = [a.ip && a.tipo !== "ip_alterado" ? `IP ${a.ip}` : "", a.hash_foto ? `hash da foto ${curto(a.hash_foto)}` : ""].filter(Boolean).join(" · ");
+      el.querySelector(".d3").textContent = [a.ip && !ehIP ? `IP ${a.ip}` : "", a.hash_foto ? `hash da foto ${curto(a.hash_foto)}` : ""].filter(Boolean).join(" · ");
       if (a.hash_foto) el.querySelector(".d3").title = `Hash SHA-256 da foto: ${a.hash_foto}` + (a.hash_nf ? `\nHash SHA-256 da NF: ${a.hash_nf}` : "");
       const acoes = el.querySelector(".acoes");
       if (a.tem_foto){
@@ -659,7 +661,8 @@ function montaPosto(p){
     <div class="row so-admin"><input type="text" placeholder="Nova senha" aria-label="Nova senha" autocomplete="off" class="e-senha"><button data-a="senha">Alterar senha</button></div>
     <div class="msg" hidden></div>`;
   el.querySelector(".pn").textContent = p.nome;
-  el.querySelector(".pc").textContent = `CNPJ ${maskCNPJ(p.cnpj)} · ${p.fotos} ${p.fotos===1?"foto":"fotos"}` + (p.alertas ? ` · ${p.alertas} alerta(s) em aberto` : "");
+  el.querySelector(".pc").textContent = `CNPJ ${maskCNPJ(p.cnpj)} · ${p.fotos} ${p.fotos===1?"foto":"fotos"}` + (p.alertas ? ` · ${p.alertas} alerta(s) em aberto` : "")
+    + (p.ultimo_login_txt ? ` · último login ${p.ultimo_login_txt} (IP ${p.ultimo_ip})` : " · ainda não fez login");
   const msg = el.querySelector(".msg"), ed = el.querySelector(".ed");
   const iC = el.querySelector(".e-cnpj"), iN = el.querySelector(".e-nome");
   iC.addEventListener("input", () => { iC.value = maskCNPJ(iC.value); });

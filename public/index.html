@@ -140,8 +140,8 @@
 
     <section class="stack" data-painel="alertas" hidden>
       <div class="panel stack">
-        <div class="row" style="justify-content:space-between"><h2>Semáforo de IP por posto</h2><span class="hint">Últimos 5 envios de cada posto</span></div>
-        <p class="hint" style="margin:0">Verde: mesmo IP em pelo menos 3 envios seguidos. Vermelho: o IP mudou entre os últimos envios (não bloqueia o posto). Cinza: poucos envios para avaliar.</p>
+        <div class="row" style="justify-content:space-between"><h2>Semáforo de IP por posto</h2><span class="hint">Últimos 5 logins de cada posto</span></div>
+        <p class="hint" style="margin:0">Controle feito pelo login do posto. Verde: mesmo IP em pelo menos 3 logins seguidos. Vermelho: o IP mudou entre os últimos logins (não bloqueia o posto). Cinza: poucos logins para avaliar (o primeiro acesso não conta).</p>
         <div class="list" id="semLista"></div>
       </div>
       <div class="panel stack">
@@ -149,7 +149,7 @@
           <h2>Alertas de erros</h2>
           <label class="check"><input type="checkbox" id="alTodos"> Mostrar também os já vistos</label>
         </div>
-        <p class="hint" style="margin:0">Tentativas bloqueadas por horário (hora da saída da nota a mais de 10 minutos da foto, ou nota sem horário legível), com a foto e o PDF enviados, e envios feitos de um IP diferente do anterior. Número de nota digitado errado não gera alerta.</p>
+        <p class="hint" style="margin:0">Tentativas bloqueadas por horário (hora da saída da nota a mais de 10 minutos da foto, ou nota sem horário legível), com a foto e o PDF enviados, e logins do posto feitos de um IP diferente do login anterior. Número de nota digitado errado não gera alerta.</p>
         <div class="list" id="alLista"></div>
       </div>
     </section>
