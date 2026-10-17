@@ -28,7 +28,9 @@ Roda num único servidor Node.js, sem dependências externas. O banco é SQLite 
 | Arquivo | Função |
 |---|---|
 | `server.js` | Servidor HTTP: banco SQLite, pasta de arquivos e telas |
-| `logica.mjs` | Regras: login, envio de fotos, conferências, alertas, postos |
+| `logica.mjs` | Regras: login, envio de fotos, conferências, alertas, IP, usuários, postos |
+| `pdf-texto.mjs` | Leitor de PDF do servidor (sem dependências) |
+| `public/leitura-nf.js` | Regras de leitura da nota, usadas no navegador e no servidor |
 | `public/` | Telas do posto e da matriz |
 | `railway.json` | Comando de início e verificação de saúde para o Railway |
 
@@ -44,6 +46,35 @@ Roda num único servidor Node.js, sem dependências externas. O banco é SQLite 
 - **Fora do horário:** o envio é bloqueado com a mensagem "entre em contato com a matriz", e um alerta aparece no portal da matriz. Número de nota digitado errado não gera alerta.
 - **Downloads:** o posto só visualiza as fotos. A matriz baixa fotos, notas e .zip.
 - **Nome dos arquivos:** `NOTA_AAAA-MM-DD_HH-MM-SS.jpg` / `.pdf`, no horário de Brasília.
+
+## Segurança e auditoria
+
+- **Leitura da nota no servidor.** O servidor relê o PDF e faz as conferências com os dados lidos por ele:
+  - número da nota;
+  - hora da saída;
+  - chave de acesso;
+  - cliente.
+
+  Se a leitura do navegador for diferente, vale a do servidor e a diferença fica registrada. Um PDF que o servidor não consiga ler (ex.: escaneado) é aceito com a marcação "não conferida no servidor".
+- **Leitor de PDF próprio** (`pdf-texto.mjs`), sem dependências. Lê PDFs compactados, com object streams e protegidos com senha vazia (RC4 e AES-128/256).
+- **IP:**
+  - o IP do envio sai no carimbo da foto e fica gravado;
+  - atrás do proxy do Railway, vale o último IP público do `X-Forwarded-For`;
+  - o IP é o da internet do posto, não o de cada computador.
+- **Semáforo de IP** na aba Alertas, olhando os últimos 5 envios de cada posto:
+  - **verde:** mesmo IP em pelo menos 3 envios;
+  - **vermelho:** o IP mudou;
+  - **cinza:** poucos envios para avaliar.
+
+  Cada troca de IP gera um alerta, sem bloquear o posto.
+- **Hash SHA-256:** a foto e a nota recebem uma impressão digital no envio. Ela aparece na matriz e no relatório e prova que o arquivo não foi alterado depois.
+- **Alertas com foto:** tentativas bloqueadas por horário guardam a foto e o PDF, que a matriz pode abrir.
+- **Usuários de consulta:** criados pelo admin na aba Usuários.
+  - Veem tudo e baixam fotos, notas e relatórios.
+  - Não alteram postos, usuários nem alertas.
+  - São desativados, nunca excluídos.
+- **Relatório Excel** na aba Fotos. Respeita os filtros e traz IP, hashes, conferência e chave de acesso.
+- **Nada é apagado:** a atualização do banco só acrescenta colunas e tabelas.
 
 ## Rodar no computador (teste)
 

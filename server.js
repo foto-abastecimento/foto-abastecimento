@@ -13,7 +13,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import vm from "node:vm";
 import logica from "./logica.mjs";
+import { extrairTextoPDF } from "./pdf-texto.mjs";
 
 const RAIZ = path.dirname(fileURLToPath(import.meta.url));
 const VOLUME = process.env.RAILWAY_VOLUME_MOUNT_PATH;
@@ -71,8 +73,14 @@ const ASSETS = {
   }
 };
 
+/* ---------- leitura da nota no servidor (mesmas regras do navegador) ---------- */
+const contextoLeitura = {};
+vm.runInNewContext(fs.readFileSync(path.join(PUBLICO, "leitura-nf.js"), "utf8"), contextoLeitura);
+
 const env = {
   DB, FILES, ASSETS,
+  lerPDF: bytes => extrairTextoPDF(Buffer.from(bytes)),
+  LeituraNF: contextoLeitura.LeituraNF,
   ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || "",
   ARMAZENAMENTO: VOLUME ? `volume do Railway em ${VOLUME}` : (process.env.DATA_DIR ? `pasta ${DADOS}` : "ATENÇÃO: sem volume, os dados somem a cada nova publicação. Crie um volume no Railway.")
 };
@@ -94,6 +102,7 @@ const servidor = http.createServer(async (req, res) => {
     }
     const headers = new Headers();
     for (const [k, v] of Object.entries(req.headers)) if (v !== undefined) headers.set(k, Array.isArray(v) ? v.join(", ") : v);
+    headers.set("x-ip-socket", req.socket.remoteAddress || ""); // sobrescreve qualquer valor enviado pelo navegador
     const resposta = await logica.fetch(new Request(url, { method: req.method, headers, body: corpo }), env);
     const saida = {};
     resposta.headers.forEach((v, k) => { saida[k] = v; });

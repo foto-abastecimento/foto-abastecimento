@@ -77,7 +77,7 @@ $("#lUsuario").addEventListener("input", e => { const v = e.target.value; if (/^
 $("#fEntrar").addEventListener("submit", async e => {
   e.preventDefault();
   const usuario = $("#lUsuario").value.trim(), senha = $("#lSenha").value;
-  if (usuario.toLowerCase() !== "admin" && !validCNPJ(usuario)) return showMsg($("#lMsg"), "CNPJ inválido. Confira os dígitos.");
+  if (/^\d/.test(usuario) && !validCNPJ(usuario)) return showMsg($("#lMsg"), "CNPJ inválido. Confira os dígitos.");
   $("#lBtn").disabled = true;
   try { await api("/api/login", { method:"POST", body:{ usuario, senha } }); showMsg($("#lMsg"), ""); await iniciar(); }
   catch (err) { showMsg($("#lMsg"), err.message); }
@@ -89,19 +89,22 @@ async function iniciar(){
   try { me = await api("/api/me"); } catch (e) { if (e.status !== 401) { mostrar("#login"); showMsg($("#lMsg"), e.message); } return; }
   if (!me || !me.papel){ mostrar("#login"); return showMsg($("#lMsg"), `Resposta inesperada do servidor. Abra ${location.origin}/api/status.`); }
   await sincronizar();
-  if (me.papel === "admin") entrarAdmin(me); else entrarPosto(me.posto);
+  if (me.papel === "admin" || me.papel === "consulta") entrarAdmin(me); else entrarPosto(me.posto);
 }
 
 /* =====================================================================
    PORTAL DO POSTO
    ===================================================================== */
-let posto = null;
+let posto = null, meuIP = "";
+async function atualizarIP(){ try { meuIP = (await api("/api/ip")).ip || ""; } catch {} $("#hIP").textContent = meuIP ? "IP " + meuIP : ""; return meuIP; }
+setInterval(() => { if (posto && !$("#posto").hidden) atualizarIP(); }, 5 * 60 * 1000);
 function entrarPosto(p){
   posto = p;
   $("#hNome").textContent = p.nome; $("#hCnpj").textContent = "CNPJ " + maskCNPJ(p.cnpj);
   limparTudo(); mostrar("#posto");
   ligarCamera();
   atualizarContagem();
+  atualizarIP();
 }
 
 /* ----- câmera do computador (navegador) ----- */
@@ -178,20 +181,7 @@ function limparTudo(){
 
 /* ----- leitura do PDF da nota ----- */
 if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
-function dvChave(c43){ let s=0,w=2; for(let i=42;i>=0;i--){ s+=(+c43[i])*w; w=w===9?2:w+1; } const r=s%11; return r<2?0:11-r; }
-function acharChave(texto){
-  const corridas = texto.replace(/(\d)[\s.\-]+(?=\d)/g,"$1").match(/\d{44,}/g) || [];
-  for (const r of corridas) for (let i=0;i+44<=r.length;i++){
-    const c = r.slice(i,i+44), mod = c.slice(20,22);
-    if ((mod==="55"||mod==="65") && dvChave(c.slice(0,43))===+c[43]) return c;
-  }
-  return null;
-}
-function acharNumeroImpresso(texto){
-  const pads = [/NFC?-e[^\d]{0,12}?n[º°o.]*\s*:?\s*([\d.]{1,11})/i, /N[º°o]\.?\s*:?\s*([\d][\d.]{0,10})\b[^\n]{0,20}?S[ée]rie/i, /N[ÚU]MERO\s*:?\s*([\d.]{1,11})/i, /\bN[º°]\.?\s*:?\s*([\d][\d.]{0,10})/i];
-  for (const p of pads){ const m = texto.match(p); if (m && soDig(m[1])) return soDig(m[1]); }
-  return null;
-}
+const { acharChave, acharNumeroImpresso, acharEmissao, destPorPosicao, destPorTexto } = window.LeituraNF;
 async function lerPDF(blob){
   if (!window.pdfjsLib) throw new Error("O leitor de PDF não carregou. Verifique a internet e recarregue a página.");
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), isEvalSupported:false }).promise;
@@ -208,122 +198,6 @@ async function lerPDF(blob){
   return { texto, itens };
 }
 
-/* Cliente favorecido: quadro DESTINATÁRIO / REMETENTE, lido pela posição (valor logo abaixo do rótulo).
-   Usa o rótulo mais próximo do título do quadro, para não pegar o do transportador. */
-const RE_TIT_DEST = /DESTINAT[ÁA]RIO/i;
-const RE_ROT_NOME = /NOME\s*\/?\s*RAZ[ÃA]O(\s+SOCIAL)?|RAZ[ÃA]O\s+SOCIAL/i;
-const RE_ROT_DOC = /CNPJ\s*\/?\s*CPF|CPF\s*\/?\s*CNPJ/i;
-function linhaAbaixo(pg, rot){
-  if (!rot) return [];
-  const cand = pg.filter(i => i.y < rot.y - 0.5 && rot.y - i.y <= Math.max(22, rot.h * 4));
-  if (!cand.length) return [];
-  const topo = Math.max(...cand.map(i => i.y));
-  return cand.filter(i => Math.abs(i.y - topo) < 2).sort((a,b) => a.x - b.x);
-}
-function destPorPosicao(itens, cnpjEmit){
-  const pg = itens.filter(i => i.p === 1);
-  const tit = pg.find(i => RE_TIT_DEST.test(i.s));
-  if (!tit) return null;
-  const abaixo = pg.filter(i => i.y <= tit.y + 1 && i !== tit);
-  const maisPerto = re => abaixo.filter(i => re.test(i.s)).sort((a,b) => (tit.y-a.y) - (tit.y-b.y))[0];
-  const rotNome = maisPerto(RE_ROT_NOME), rotDoc = maisPerto(RE_ROT_DOC);
-  const ehNumero = s => /^[\d.\/\-:\s]+$/.test(s);
-  let nome = "";
-  if (rotNome){
-    const viz = pg.filter(i => i !== rotNome && Math.abs(i.y - rotNome.y) < 2 && i.x > rotNome.x + 1);
-    const dir = Math.min(Infinity, ...viz.map(i => i.x));
-    nome = linhaAbaixo(pg, rotNome).filter(i => i.x >= rotNome.x - 3 && i.x < dir && !ehNumero(i.s)).map(i => i.s).join(" ").replace(/\s+/g," ").trim();
-    if ((nome.match(/[A-Za-zÀ-ÿ]/g)||[]).length < 2) nome = "";
-  }
-  let doc = "";
-  if (rotDoc){
-    const centro = rotDoc.x + rotDoc.w/2;
-    const nums = linhaAbaixo(pg, rotDoc).map(i => ({ d: soDig(i.s), dist: Math.abs(i.x + i.w/2 - centro) }))
-      .filter(o => (o.d.length === 14 && o.d !== cnpjEmit && validCNPJ(o.d)) || (o.d.length === 11 && validCPF(o.d)))
-      .sort((a,b) => a.dist - b.dist);
-    if (nums.length) doc = nums[0].d;
-  }
-  if (!nome && !doc) return null;
-  return { nome: nome.slice(0,100), doc };
-}
-/* reserva: leitura pelo texto corrido (NFC-e e leiautes diferentes) */
-function destPorTexto(texto, cnpjEmit){
-  const t = texto.replace(/\s+/g," ");
-  let i = t.search(/DESTINAT[ÁA]RIO/i), trecho;
-  if (i >= 0) trecho = t.slice(i, i+700);
-  else {
-    const j = t.search(/CONSUMIDOR/i); if (j < 0) return null;
-    trecho = t.slice(j, j+300);
-    if (/CONSUMIDOR\s*N[ÃA]O\s+IDENTIFICADO/i.test(trecho)) return { nome:"Consumidor não identificado", doc:"" };
-  }
-  let doc = "";
-  for (const m of trecho.matchAll(/\b\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/g)){ const d = soDig(m[0]); if (d !== cnpjEmit && validCNPJ(d)) { doc = d; break; } }
-  if (!doc) for (const m of trecho.matchAll(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g)){ const d = soDig(m[0]); if (validCPF(d)) { doc = d; break; } }
-  const ROTULOS = /\b(DESTINAT[ÁA]RIO\s*\/?\s*REMETENTE|DESTINAT[ÁA]RIO|CONSUMIDOR|NOME\s*\/\s*RAZ[ÃA]O\s+SOCIAL|RAZ[ÃA]O\s+SOCIAL|NOME|CNPJ\s*\/\s*CPF|CNPJ|CPF|DATA\s+D[AE]\s+EMISS[ÃA]O|DATA\s+D[AE]\s+SA[ÍI]DA(?:\s*\/\s*ENTRADA)?|HORA\s+D[AE]\s+SA[ÍI]DA|ENDERE[ÇC]O|BAIRRO\s*\/?\s*DISTRITO|BAIRRO|CEP|MUNIC[ÍI]PIO|UF|FONE\s*\/?\s*FAX|FONE|INSCRI[ÇC][ÃA]O\s+ESTADUAL|IE)\b\s*:?/gi;
-  const partes = trecho.replace(ROTULOS,"|").replace(/[\d][\d.\/\-: ]{4,}[\d]/g,"|").split("|").map(s => s.replace(/^[\s\/\-:.,]+|[\s\/\-:.,]+$/g,"").trim());
-  const nome = partes.find(s => (s.match(/[A-Za-zÀ-ÿ]/g)||[]).length >= 3) || "";
-  return { nome: nome.slice(0,100), doc };
-}
-
-/* Data e hora de emissão */
-const RE_DT = "(\\d{2})\\/(\\d{2})\\/(\\d{4})[\\s,T\\-–àsÀS]*(\\d{2}):(\\d{2})(?::(\\d{2}))?(?:\\s*([+\\-]\\d{2}):?(\\d{2}))?";
-function montaData(d, mo, y, h, mi, s, offH, offM){
-  const off = offH ? `${offH}:${offM||"00"}` : "-03:00"; // sem fuso impresso: horário de Brasília
-  const t = Date.parse(`${y}-${mo}-${d}T${h}:${mi}:${s||"00"}${off}`);
-  return isNaN(t) ? null : { ms: t, texto: `${d}/${mo}/${y} ${h}:${mi}:${s||"00"}` };
-}
-function valorAbaixoRotulo(itens, re){
-  const pg = itens.filter(i => i.p === 1);
-  const rot = pg.find(i => re.test(i.s)); if (!rot) return "";
-  const linha = linhaAbaixo(pg, rot), centro = rot.x + rot.w/2;
-  linha.sort((a,b) => Math.abs(a.x+a.w/2-centro) - Math.abs(b.x+b.w/2-centro));
-  return linha.length ? linha[0].s : "";
-}
-/* Horário da nota: campo HORA DA SAÍDA do DANFE (data da saída, ou da emissão se a da saída estiver vazia).
-   O valor fica logo abaixo do rótulo, na mesma coluna; só aceita um horário válido (hh:mm ou hh:mm:ss). */
-const RE_ROT_HSAIDA = /HORA\s+(?:D[AE]\s+)?SA\S{0,3}DA/i;
-const RE_ROT_DSAIDA = /DATA\s+(?:D[AE]\s+)?SA\S{0,3}DA/i;
-const RE_ROT_DEMIS = /DATA\s+(?:D[AE]\s+)?EMISS/i;
-function valorNaColuna(itens, re, padrao){
-  const pg = itens.filter(i => i.p === 1);
-  for (const rot of pg.filter(i => re.test(i.s))){
-    const centro = rot.x + rot.w/2, folga = Math.max(40, rot.w);
-    const cand = pg.filter(i => i !== rot && i.y < rot.y - 0.5 && rot.y - i.y <= Math.max(22, rot.h*4) && Math.abs(i.x + i.w/2 - centro) <= folga && padrao.test(i.s))
-      .sort((a,b) => (b.y - a.y) || (Math.abs(a.x+a.w/2-centro) - Math.abs(b.x+b.w/2-centro)));
-    if (cand.length) return cand[0].s.match(padrao);
-  }
-  return null;
-}
-function horaValida(h, mi, s){ return +h <= 23 && +mi <= 59 && (s === undefined || +s <= 59); }
-function acharHoraSaida(texto, itens){
-  const t = texto.replace(/\s+/g," ");
-  const RE_H = /(\d{2}):(\d{2})(?::(\d{2}))?/, RE_D = /(\d{2})\/(\d{2})\/(\d{4})/;
-  let h = valorNaColuna(itens, RE_ROT_HSAIDA, RE_H);
-  if (!h){ const m = t.match(/HORA\s+(?:D[AE]\s+)?SA\S{0,3}DA\s*:?\s*(\d{2}):(\d{2})(?::(\d{2}))?/i); if (m) h = m; }
-  if (!h || !horaValida(h[1], h[2], h[3])) return null;
-  let d = valorNaColuna(itens, RE_ROT_DSAIDA, RE_D) || valorNaColuna(itens, RE_ROT_DEMIS, RE_D);
-  if (!d) d = t.match(/DATA\s+(?:D[AE]\s+)?SA\S{0,3}DA(?:\s*\/\s*ENTRADA)?\s*:?\s*(\d{2})\/(\d{2})\/(\d{4})/i) || t.match(/EMISS[ÃA]O[^\d]{0,40}?(\d{2})\/(\d{2})\/(\d{4})/i);
-  if (!d) return null;
-  const r = montaData(d[1], d[2], d[3], h[1], h[2], h[3]);
-  return r ? { ...r, fonte: "hora da saída" } : null;
-}
-function acharEmissao(texto, itens){
-  // 1º: HORA DA SAÍDA do DANFE (regra definida pela matriz)
-  const saida = acharHoraSaida(texto, itens);
-  if (saida) return saida;
-  // reservas: notas sem esse campo preenchido (ex.: NFC-e)
-  const t = texto.replace(/\s+/g," ");
-  let m = t.match(new RegExp("EMISS[ÃA]O[^\\d]{0,40}?" + RE_DT, "i"));
-  if (m){ const r = montaData(...m.slice(1)); if (r) return { ...r, fonte: "data/hora de emissão impressa" }; }
-  const vd = valorAbaixoRotulo(itens, /DATA\s+D[AE]\s+EMISS/i), vh = valorAbaixoRotulo(itens, /HORA\s+D[AE]\s+EMISS/i);
-  const md = vd.match(new RegExp(RE_DT));
-  if (md){ const r = montaData(...md.slice(1)); if (r) return { ...r, fonte: "campo data/hora da emissão" }; }
-  const sd = vd.match(/(\d{2})\/(\d{2})\/(\d{4})/), sh = vh.match(/(\d{2}):(\d{2})(?::(\d{2}))?/);
-  if (sd && sh){ const r = montaData(sd[1],sd[2],sd[3],sh[1],sh[2],sh[3]); if (r) return { ...r, fonte: "campos data e hora da emissão" }; }
-  m = t.match(new RegExp("\\b\\d{15}\\b\\s*[-–]?\\s*" + RE_DT));
-  if (m){ const r = montaData(...m.slice(1)); if (r) return { ...r, fonte: "horário de autorização (protocolo)" }; }
-  return null;
-}
 
 function mostraNF(cls, titulo, det){
   const el = $("#nfRes"); el.className = "nfres " + cls; el.innerHTML = "";
@@ -395,11 +269,16 @@ function enviarAlerta(v){
   const chave = [v.tipo, numInt($("#fNota").value) || nf.numero, nf.emissao ? nf.emissao.texto : "", pendente.brasilia].join("|");
   if (alertasEnviados.has(chave)) return;
   alertasEnviados.add(chave);
-  api("/api/alertas", { method:"POST", body:{
+  // o alerta leva a foto e o PDF, para a matriz abrir na aba Alertas
+  const fd = new FormData();
+  fd.append("foto", pendente.blob, "foto.jpg");
+  if (nf.arquivo) fd.append("nf", nf.arquivo, "nota.pdf");
+  fd.append("meta", JSON.stringify({
     tipo: v.tipo, nota: $("#fNota").value.trim() || nf.numero, cliente: $("#fCliente").value.trim(),
     emissao: nf.emissao ? nf.emissao.texto : null, emissaoFonte: nf.emissao ? nf.emissao.fonte : null,
-    fotoEm: pendente.brasilia, difMin: v.dif
-  } }).catch(() => alertasEnviados.delete(chave));
+    fotoEm: pendente.brasilia, fotoEmISO: new Date(pendente.capturadoMs).toISOString(), difMin: v.dif
+  }));
+  api("/api/alertas", { method:"POST", body: fd }).catch(() => alertasEnviados.delete(chave));
 }
 
 /* ----- captura com carimbo ----- */
@@ -409,6 +288,7 @@ $("#btnFoto").onclick = async () => {
   if (!stream || !video.videoWidth) return showMsg($("#capMsg"), "A câmera ainda não está pronta.");
   if (!cliente || !nota) return showMsg($("#capMsg"), "Preencha cliente/motorista e número da nota antes da foto.");
   try { await document.fonts.load("700 20px 'JetBrains Mono'"); } catch {}
+  const ip = await atualizarIP();
   const quando = agora(), p = brt(quando);
   const w = video.videoWidth, h = video.videoHeight;
   const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
@@ -417,7 +297,8 @@ $("#btnFoto").onclick = async () => {
   const linhas = [
     `${brtTexto(p)}  (Horário de Brasília)`,
     `Loja: ${posto.nome}  |  CNPJ: ${maskCNPJ(posto.cnpj)}`,
-    `Cliente/Motorista: ${cliente}  |  Nota: ${nota}`
+    `Cliente/Motorista: ${cliente}  |  Nota: ${nota}`,
+    `IP: ${ip || "não identificado"}`
   ];
   const bandH = linhas.length*lh + pad*2;
   ctx.fillStyle = "rgba(0,0,0,0.74)"; ctx.fillRect(0, h-bandH, w, bandH);
@@ -430,7 +311,7 @@ $("#btnFoto").onclick = async () => {
   });
   const blob = await new Promise(r => cv.toBlob(r, "image/jpeg", 0.9));
   if (pendente) URL.revokeObjectURL(pendente.url);
-  pendente = { blob, url: URL.createObjectURL(blob), capturadoMs: quando.getTime(), brasilia: brtTexto(p), nota, cliente };
+  pendente = { blob, url: URL.createObjectURL(blob), capturadoMs: quando.getTime(), brasilia: brtTexto(p), nota, cliente, ip };
   $("#preview").src = pendente.url; $("#preview").hidden = false; video.hidden = true;
   $("#capActions").hidden = true; $("#revActions").hidden = false;
   atualizaBotao();
@@ -464,7 +345,7 @@ $("#btnSalvar").onclick = async () => {
   fd.append("foto", pendente.blob, "foto.jpg");
   fd.append("nf", nf.arquivo, "nota.pdf");
   fd.append("meta", JSON.stringify({
-    cliente: pendente.cliente, nota: pendente.nota, capturadoEm: new Date(pendente.capturadoMs).toISOString(),
+    cliente: pendente.cliente, nota: pendente.nota, capturadoEm: new Date(pendente.capturadoMs).toISOString(), ipCarimbo: pendente.ip || "",
     destNome, destDoc, destOrigem: editado ? "editado à mão" : "lido do PDF",
     nf: { numero: nf.numero, serie: nf.serie || "", modelo: nf.modelo || "", cnpjEmit: nf.cnpjEmit || "", emissaoMs: nf.emissao.ms, emissaoFonte: nf.emissao.fonte }
   }));
@@ -472,7 +353,7 @@ $("#btnSalvar").onclick = async () => {
   try {
     const r = await api("/api/fotos", { method:"POST", body: fd });
     limparTudo();
-    showMsg($("#capMsg"), `Salvo: ${r.arquivo} + ${r.arquivoNf}`, "ok");
+    showMsg($("#capMsg"), `Salvo: ${r.arquivo} + ${r.arquivoNf}. Impressão digital (hash) da foto: ${String(r.hashFoto || "").slice(0, 16)}…`, "ok");
     atualizarContagem();
   } catch (e) {
     if (e.dados && e.dados.alertaMatriz) mostraAlertaHorario({ ok:false, titulo: e.message, det: "O servidor bloqueou o envio." });
@@ -512,26 +393,45 @@ $("#pBusca").addEventListener("input", debounce(listarPosto));
 $("#pLimpar").onclick = () => { ["#pBusca","#pMes","#pCli","#pTipo"].forEach(s => $(s).value = ""); listarPosto(); };
 
 /* ----- item do banco (comum) ----- */
-function montaItem(f, ehAdmin){
+const curto = h => h ? h.slice(0, 12) + "…" : "";
+function montaItem(f, ehMatriz){
   const el = document.createElement("div"); el.className = "item";
-  el.innerHTML = `<img alt="" loading="lazy"><div style="min-width:0"><div class="cli"></div><div class="when"></div><div class="meta"></div><div class="row"><button data-a="ver">Ver foto</button></div></div>`;
+  el.innerHTML = `<img alt="" loading="lazy"><div style="min-width:0"><div class="cli"></div><div class="when"></div><div class="meta"></div><div class="meta seg"></div><div class="row"><button data-a="ver">Ver foto</button></div></div>`;
   const src = `/api/fotos/${f.id}/foto`;
   const img = el.querySelector("img"); img.src = src;
-  if (!ehAdmin){ img.addEventListener("contextmenu", e => e.preventDefault()); img.draggable = false; }
+  if (!ehMatriz){ img.addEventListener("contextmenu", e => e.preventDefault()); img.draggable = false; }
   el.querySelector(".cli").textContent = f.dest_nome || f.cliente;
   el.querySelector(".when").textContent = f.capturado_txt;
   const meta = el.querySelector(".meta");
-  if (ehAdmin){ const pc = document.createElement("span"); pc.className = "chip posto-chip"; pc.textContent = f.posto_nome || "Posto"; meta.appendChild(pc); }
+  if (ehMatriz){ const pc = document.createElement("span"); pc.className = "chip posto-chip"; pc.textContent = f.posto_nome || "Posto"; meta.appendChild(pc); }
   const partes = [`Nota ${f.nota}`];
   if (f.dest_doc) partes.push(`${f.dest_tipo === "PF" ? "CPF" : "CNPJ"} ${fmtDoc(f.dest_doc)}`);
   partes.push(`Motorista: ${f.cliente}`);
   meta.appendChild(document.createTextNode(partes.join(" · ")));
-  const chip = document.createElement("span"); chip.className = "chip"; chip.textContent = "NF conferida";
-  chip.title = [`Horário da nota ${f.nf_emissao || "?"}`, f.dif_min != null ? `diferença ${f.dif_min} min` : "", f.dest_origem === "editado à mão" ? "cliente corrigido à mão" : ""].filter(Boolean).join(" · ");
-  meta.appendChild(chip);
-  const ver = () => { $("#viewImg").src = src; $("#viewName").textContent = ehAdmin ? f.arquivo : `${f.dest_nome || f.cliente} · ${f.capturado_txt}`; $("#viewImg").oncontextmenu = ehAdmin ? null : (e => e.preventDefault()); $("#viewer").hidden = false; };
+  const seg = el.querySelector(".seg");
+  if (ehMatriz){
+    const chip = document.createElement("span");
+    if (f.verif_servidor && f.verif_servidor.startsWith("conferida")) { chip.className = "chip"; chip.textContent = "NF conferida no servidor"; }
+    else if (f.verif_servidor) { chip.className = "chip aviso-chip"; chip.textContent = "NF não conferida no servidor"; }
+    else { chip.className = "chip neutro"; chip.textContent = "Envio anterior à conferência no servidor"; }
+    chip.title = [`Horário da nota ${f.nf_emissao || "?"}`, f.dif_min != null ? `diferença ${f.dif_min} min` : "", f.dest_origem === "editado à mão" ? "cliente corrigido à mão" : "", f.divergencia ? "Divergência: " + f.divergencia : ""].filter(Boolean).join(" · ");
+    seg.appendChild(chip);
+    const info = [];
+    if (f.ip) info.push(`IP ${f.ip}`);
+    if (f.hash_foto) info.push(`hash ${curto(f.hash_foto)}`);
+    if (info.length) seg.appendChild(document.createTextNode(" " + info.join(" · ")));
+    if (f.divergencia){ const d = document.createElement("div"); d.className = "diverg"; d.textContent = "⚠ " + f.divergencia; seg.appendChild(d); }
+    if (f.hash_foto) seg.title = `Hash SHA-256 da foto: ${f.hash_foto}` + (f.hash_nf ? `\nHash SHA-256 da NF: ${f.hash_nf}` : "");
+  } else seg.remove();
+  const ver = () => {
+    $("#viewImg").src = src;
+    $("#viewName").textContent = ehMatriz ? f.arquivo : `${f.dest_nome || f.cliente} · ${f.capturado_txt}`;
+    $("#viewHash").textContent = ehMatriz && f.hash_foto ? `Hash SHA-256 da foto: ${f.hash_foto}` : "";
+    $("#viewImg").oncontextmenu = ehMatriz ? null : (e => e.preventDefault());
+    $("#viewer").hidden = false;
+  };
   img.onclick = ver; el.querySelector('[data-a="ver"]').onclick = ver;
-  if (ehAdmin){
+  if (ehMatriz){
     const row = el.querySelector(".row");
     const a1 = document.createElement("a"); a1.className = "btn"; a1.href = src + "?download=1"; a1.textContent = "Baixar foto"; row.appendChild(a1);
     const a2 = document.createElement("a"); a2.className = "btn"; a2.href = `/api/fotos/${f.id}/nf`; a2.textContent = "Baixar NF"; row.appendChild(a2);
@@ -541,20 +441,26 @@ function montaItem(f, ehAdmin){
 $("#viewClose").onclick = () => { $("#viewer").hidden = true; };
 
 /* =====================================================================
-   PORTAL DA MATRIZ
+   PORTAL DA MATRIZ (admin e usuários de consulta)
    ===================================================================== */
+let ehAdmin = false;
 function entrarAdmin(me){
   posto = null;
+  ehAdmin = me.papel === "admin";
+  document.body.classList.toggle("modo-consulta", !ehAdmin);
+  $("#aQuem").textContent = ehAdmin ? "Administrador" : `Consulta · ${me.nome || ""}`;
   $("#avisoSenha").hidden = !me.senhaPadrao;
   mostrar("#admin"); abrirAba("fotos");
   carregarOpcoesAdmin().then(listarAdmin);
   contarAlertas();
 }
 function abrirAba(aba){
+  if (aba === "usuarios" && !ehAdmin) aba = "fotos";
   $$(".abas button").forEach(b => b.setAttribute("aria-selected", b.dataset.aba === aba));
   $$("[data-painel]").forEach(p => p.hidden = p.dataset.painel !== aba);
   if (aba === "alertas") listarAlertas();
   if (aba === "postos") listarPostos();
+  if (aba === "usuarios") listarUsuarios();
   if (aba === "fotos") carregarOpcoesAdmin();
 }
 $$(".abas button").forEach(b => b.onclick = () => abrirAba(b.dataset.aba));
@@ -582,8 +488,8 @@ async function listarAdmin(){
     const r = await api("/api/fotos?" + q);
     ultimaListaAdmin = r.fotos;
     $("#aCount").textContent = (r.total === r.geral ? `${r.geral} fotos` : `${r.total} de ${r.geral} fotos`) + (r.fotos.length < r.total ? ` (mostrando as ${r.fotos.length} mais recentes)` : "");
-    $("#aZip").disabled = !r.fotos.length;
-    $("#aZipInfo").textContent = r.fotos.length ? `${r.fotos.length} fotos e ${r.fotos.length} notas` : "";
+    $("#aZip").disabled = !r.fotos.length; $("#aExcel").disabled = !r.total;
+    $("#aZipInfo").textContent = r.fotos.length ? `${r.fotos.length} fotos e ${r.fotos.length} notas no .zip` : "";
     lista.innerHTML = "";
     if (!r.fotos.length){ lista.innerHTML = `<div class="empty">${r.geral ? "Nenhuma foto com esses filtros." : "Nenhuma foto em nenhum posto ainda."}</div>`; return; }
     r.fotos.forEach(f => lista.appendChild(montaItem(f, true)));
@@ -592,6 +498,12 @@ async function listarAdmin(){
 $("#aBusca").addEventListener("input", debounce(listarAdmin));
 ["#aPosto","#aCli","#aTipo","#aDe","#aAte"].forEach(s => $(s).addEventListener("change", listarAdmin));
 $("#aLimpar").onclick = () => { ["#aBusca","#aPosto","#aCli","#aTipo","#aDe","#aAte"].forEach(s => $(s).value = ""); listarAdmin(); };
+
+function baixarBlob(blob, nome){
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = nome;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+const carimboArquivo = () => { const p = brt(agora()); return `${p.year}-${p.month}-${p.day}_${p.hour}-${p.minute}-${p.second}`; };
 
 $("#aZip").onclick = async () => {
   const fotos = ultimaListaAdmin;
@@ -608,42 +520,104 @@ $("#aZip").onclick = async () => {
       if (rf.ok) z.file(pasta + f.arquivo, await rf.blob());
       if (rn.ok) z.file(pasta + f.arquivo_nf, await rn.blob());
     }
-    const blob = await z.generateAsync({ type:"blob" });
-    const p = brt(agora());
-    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-    a.download = `fotos_matriz_${p.year}-${p.month}-${p.day}_${p.hour}-${p.minute}-${p.second}.zip`;
-    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    baixarBlob(await z.generateAsync({ type:"blob" }), `fotos_matriz_${carimboArquivo()}.zip`);
     showMsg($("#aMsg"), "Arquivo .zip gerado.", "ok");
   } catch (e) { showMsg($("#aMsg"), "Não foi possível gerar o .zip: " + e.message); }
   finally { btn.disabled = false; }
 };
 
-/* ----- alertas ----- */
+/* ----- relatório Excel (respeita os filtros) ----- */
+$("#aExcel").onclick = async () => {
+  if (!window.XLSX) return showMsg($("#aMsg"), "O gerador de Excel não carregou. Recarregue a página.");
+  const btn = $("#aExcel"); btn.disabled = true; showMsg($("#aMsg"), "Gerando o relatório…", "ok");
+  try {
+    const q = filtrosAdmin(); q.set("relatorio", "1"); q.set("limite", "20000");
+    const r = await api("/api/fotos?" + q);
+    const linhas = r.fotos.map(f => ({
+      "Data/hora da foto (Brasília)": f.capturado_txt,
+      "Posto": f.posto_nome || "", "CNPJ do posto": maskCNPJ(f.posto_cnpj || ""),
+      "Nota": f.nota, "Série": f.nf_serie || "", "Modelo": f.nf_modelo || "",
+      "Motorista / cliente informado": f.cliente,
+      "Cliente da nota": f.dest_nome || "", "CNPJ/CPF do cliente": fmtDoc(f.dest_doc || ""),
+      "Tipo de cliente": f.dest_tipo === "PJ" ? "Pessoa jurídica" : f.dest_tipo === "PF" ? "Pessoa física" : "Não identificado",
+      "Cliente corrigido à mão": f.dest_origem === "editado à mão" ? "Sim" : "Não",
+      "Horário da nota": f.nf_emissao || "", "Origem do horário": f.nf_emissao_fonte || "",
+      "Diferença nota x foto (min)": f.dif_min,
+      "Conferência no servidor": f.verif_servidor || "anterior à conferência no servidor",
+      "Divergências": f.divergencia || "",
+      "IP do envio": f.ip || "", "IP no carimbo": f.ip_carimbo || "",
+      "Hash SHA-256 da foto": f.hash_foto || "", "Hash SHA-256 da NF": f.hash_nf || "",
+      "Chave de acesso": f.nf_chave || "", "CNPJ emitente": maskCNPJ(f.nf_cnpj_emit || ""),
+      "Arquivo da foto": f.arquivo, "Arquivo da NF": f.arquivo_nf
+    }));
+    const ws = XLSX.utils.json_to_sheet(linhas);
+    ws["!cols"] = Object.keys(linhas[0] || {}).map(k => ({ wch: Math.min(60, Math.max(12, k.length + 2)) }));
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Autenticações");
+    const filtros = [["Gerado em (Brasília)", brtTexto(brt(agora()))], ["Registros", String(linhas.length)]];
+    [["Posto","#aPosto"],["Cliente","#aCli"],["Tipo de cliente","#aTipo"],["Data de","#aDe"],["Data até","#aAte"],["Busca","#aBusca"]].forEach(([n,s]) => { const el = $(s); const v = el.tagName === "SELECT" ? (el.value ? el.options[el.selectedIndex].text : "") : el.value; if (v) filtros.push([n, v]); });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["Filtro", "Valor"], ...filtros]), "Filtros");
+    const out = XLSX.write(wb, { bookType:"xlsx", type:"array" });
+    baixarBlob(new Blob([out], { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), `relatorio_foto_abastecimento_${carimboArquivo()}.xlsx`);
+    showMsg($("#aMsg"), `Relatório gerado com ${linhas.length} registro(s).`, "ok");
+  } catch (e) { showMsg($("#aMsg"), "Não foi possível gerar o relatório: " + e.message); }
+  finally { btn.disabled = false; }
+};
+
+/* ----- alertas + semáforo de IP ----- */
 async function contarAlertas(){
-  try { const r = await api("/api/alertas"); const n = r.abertos; $("#nAlertas").textContent = n; $("#nAlertas").hidden = !n; } catch {}
+  try { const r = await api("/api/alertas"); atualizarBadge(r); } catch {}
+}
+function atualizarBadge(r){
+  const vermelhos = (r.semaforo || []).filter(x => x.cor === "vermelho").length;
+  const n = r.abertos; $("#nAlertas").textContent = n || (vermelhos ? "!" : 0); $("#nAlertas").hidden = !n && !vermelhos;
 }
 setInterval(() => { if (!$("#admin").hidden) contarAlertas(); }, 60000);
 async function listarAlertas(){
-  const lista = $("#alLista");
+  const lista = $("#alLista"), sem = $("#semLista");
   try {
     const r = await api("/api/alertas" + ($("#alTodos").checked ? "?todos=1" : ""));
-    $("#nAlertas").textContent = r.abertos; $("#nAlertas").hidden = !r.abertos;
+    atualizarBadge(r);
+    // semáforo
+    sem.innerHTML = "";
+    if (!r.semaforo.length) sem.innerHTML = `<div class="empty">Nenhum posto cadastrado.</div>`;
+    r.semaforo.forEach(x => {
+      const el = document.createElement("div"); el.className = "sem";
+      el.innerHTML = `<span class="luz"></span><div style="min-width:0"><b class="pn"></b><div class="hint tx"></div><div class="mono hint ips"></div></div>`;
+      el.querySelector(".luz").className = "luz " + x.cor;
+      el.querySelector(".luz").title = x.cor === "verde" ? "Sem alteração de IP" : x.cor === "vermelho" ? "IP alterado" : "Histórico insuficiente";
+      el.querySelector(".pn").textContent = `${x.posto_nome} · CNPJ ${maskCNPJ(x.posto_cnpj)}`;
+      el.querySelector(".tx").textContent = x.texto;
+      el.querySelector(".ips").textContent = x.envios.map(e => `${e.ip} (${e.capturado_txt})`).join("  ·  ");
+      sem.appendChild(el);
+    });
+    // alertas
     lista.innerHTML = "";
     if (!r.alertas.length){ lista.innerHTML = `<div class="empty">Nenhum alerta ${$("#alTodos").checked ? "registrado" : "em aberto"}.</div>`; return; }
     r.alertas.forEach(a => {
-      const el = document.createElement("div"); el.className = "al" + (a.visto ? " visto" : "");
-      const criado = brtTexto(brt(new Date(a.criado_em)));
-      el.innerHTML = `<div class="row" style="justify-content:space-between"><div><span class="chip erro"></span> <b class="pn"></b></div><span class="mono hint"></span></div><div class="det d1"></div><div class="det d2"></div><div class="row"></div>`;
+      const el = document.createElement("div"); el.className = "al" + (a.visto ? " visto" : "") + (a.tipo === "ip_alterado" ? " ip" : "");
+      el.innerHTML = `<div class="al-corpo"><div class="al-texto"><div class="row" style="justify-content:space-between"><div><span class="chip erro"></span> <b class="pn"></b></div><span class="mono hint quando"></span></div><div class="det d1"></div><div class="det d2"></div><div class="det d3"></div><div class="row acoes"></div></div></div>`;
       el.querySelector(".chip").textContent = a.tipo_txt;
       el.querySelector(".pn").textContent = `${a.posto_nome || "Posto"} · CNPJ ${maskCNPJ(a.posto_cnpj || "")}`;
-      el.querySelector(".mono").textContent = criado;
-      el.querySelector(".d1").textContent = `Nota ${a.nota || "?"} · Motorista: ${a.cliente || "?"}`;
+      el.querySelector(".quando").textContent = "Registrado em " + brtTexto(brt(new Date(a.criado_em)));
+      el.querySelector(".d1").textContent = `Nota ${a.nota || "?"} · Motorista: ${a.cliente || "?"} · Foto: ${a.foto_em || "?"}`;
       el.querySelector(".d2").textContent = a.tipo === "atraso"
-        ? `Horário da nota ${a.emissao || "?"} · Foto ${a.foto_em || "?"} · Diferença ${a.dif_min != null ? a.dif_min + " min" : "?"}${a.emissao_fonte ? " (" + a.emissao_fonte + ")" : ""}`
-        : `Foto ${a.foto_em || "?"} · horário da nota não encontrado no PDF`;
-      const row = el.querySelector(".row:last-child");
-      if (a.visto){ const s = document.createElement("span"); s.className = "hint"; s.textContent = "Visto em " + brtTexto(brt(new Date(a.visto_em))); row.appendChild(s); }
-      else { const b = document.createElement("button"); b.textContent = "Marcar como visto"; b.onclick = async () => { b.disabled = true; try { await api(`/api/alertas/${a.id}`, { method:"PUT", body:{ visto:true } }); listarAlertas(); } catch (e) { b.disabled = false; alertaErro(row, e.message); } }; row.appendChild(b); }
+        ? `Horário da nota ${a.emissao || "?"} · Diferença ${a.dif_min != null ? a.dif_min + " min" : "?"}${a.emissao_fonte ? " (" + a.emissao_fonte + ")" : ""}`
+        : a.tipo === "ip_alterado" ? `IP anterior ${a.ip_anterior || "?"} → IP deste envio ${a.ip || "?"} (envio aceito)`
+        : "Horário da nota (hora da saída) não encontrado no PDF";
+      el.querySelector(".d3").textContent = [a.ip && a.tipo !== "ip_alterado" ? `IP ${a.ip}` : "", a.hash_foto ? `hash da foto ${curto(a.hash_foto)}` : ""].filter(Boolean).join(" · ");
+      if (a.hash_foto) el.querySelector(".d3").title = `Hash SHA-256 da foto: ${a.hash_foto}` + (a.hash_nf ? `\nHash SHA-256 da NF: ${a.hash_nf}` : "");
+      const acoes = el.querySelector(".acoes");
+      if (a.tem_foto){
+        const img = document.createElement("img"); img.className = "al-img"; img.alt = "Foto da tentativa"; img.loading = "lazy"; img.src = `/api/alertas/${a.id}/foto`;
+        const abrir = () => { $("#viewImg").src = img.src; $("#viewName").textContent = `Alerta · ${a.posto_nome || ""} · nota ${a.nota || "?"} · ${a.foto_em || ""}`; $("#viewHash").textContent = a.hash_foto ? `Hash SHA-256 da foto: ${a.hash_foto}` : ""; $("#viewImg").oncontextmenu = null; $("#viewer").hidden = false; };
+        img.onclick = abrir;
+        el.querySelector(".al-corpo").prepend(img);
+        const bv = document.createElement("button"); bv.textContent = "Ver foto"; bv.onclick = abrir; acoes.appendChild(bv);
+        const bf = document.createElement("a"); bf.className = "btn"; bf.href = `/api/alertas/${a.id}/foto?download=1`; bf.textContent = "Baixar foto"; acoes.appendChild(bf);
+      }
+      if (a.tem_nf){ const bn = document.createElement("a"); bn.className = "btn"; bn.href = `/api/alertas/${a.id}/nf`; bn.textContent = "Baixar NF"; acoes.appendChild(bn); }
+      if (a.visto){ const s = document.createElement("span"); s.className = "hint"; s.textContent = "Visto em " + brtTexto(brt(new Date(a.visto_em))); acoes.appendChild(s); }
+      else if (r.podeMarcar){ const b = document.createElement("button"); b.textContent = "Marcar como visto"; b.onclick = async () => { b.disabled = true; try { await api(`/api/alertas/${a.id}`, { method:"PUT", body:{ visto:true } }); listarAlertas(); } catch (e) { b.disabled = false; alertaErro(acoes, e.message); } }; acoes.appendChild(b); }
       lista.appendChild(el);
     });
   } catch (e) { lista.innerHTML = ""; alertaErro(lista, e.message); }
@@ -669,20 +643,20 @@ async function listarPostos(){
   try {
     const r = await api("/api/postos");
     box.innerHTML = "";
-    if (!r.postos.length){ box.innerHTML = `<div class="empty">Nenhum posto cadastrado. Use o formulário acima.</div>`; return; }
+    if (!r.postos.length){ box.innerHTML = `<div class="empty">Nenhum posto cadastrado.${ehAdmin ? " Use o formulário acima." : ""}</div>`; return; }
     r.postos.forEach(p => box.appendChild(montaPosto(p)));
   } catch (e) { box.innerHTML = ""; alertaErro(box, e.message); }
 }
 function montaPosto(p){
   const el = document.createElement("div"); el.className = "posto";
   el.innerHTML = `
-    <div class="row" style="justify-content:space-between"><div><b class="pn"></b><div class="mono hint pc"></div></div><button data-a="editar">Editar posto</button></div>
+    <div class="row" style="justify-content:space-between"><div><b class="pn"></b><div class="mono hint pc"></div></div><button data-a="editar" class="so-admin">Editar posto</button></div>
     <div class="stack ed" hidden>
       <div class="fields"><div><label>CNPJ do posto</label><input class="mono e-cnpj"></div><div><label>Nome do posto</label><input class="e-nome" maxlength="60"></div></div>
       <div class="row"><button class="primary" data-a="salvar">Salvar alterações</button><button data-a="cancelar">Cancelar</button></div>
       <span class="hint">As fotos e alertas continuam vinculados a este posto. O posto passa a entrar com o CNPJ novo.</span>
     </div>
-    <div class="row"><input type="text" placeholder="Nova senha" aria-label="Nova senha" autocomplete="off" class="e-senha"><button data-a="senha">Alterar senha</button></div>
+    <div class="row so-admin"><input type="text" placeholder="Nova senha" aria-label="Nova senha" autocomplete="off" class="e-senha"><button data-a="senha">Alterar senha</button></div>
     <div class="msg" hidden></div>`;
   el.querySelector(".pn").textContent = p.nome;
   el.querySelector(".pc").textContent = `CNPJ ${maskCNPJ(p.cnpj)} · ${p.fotos} ${p.fotos===1?"foto":"fotos"}` + (p.alertas ? ` · ${p.alertas} alerta(s) em aberto` : "");
@@ -703,6 +677,47 @@ function montaPosto(p){
     catch (e) { showMsg(msg, e.message); }
   };
   return el;
+}
+
+/* ----- usuários de consulta (só o admin) ----- */
+$("#fNovoUsuario").addEventListener("submit", async e => {
+  e.preventDefault();
+  const usuario = $("#uUsuario").value.trim().toLowerCase(), nome = $("#uNome").value.trim(), senha = $("#uSenha").value;
+  try {
+    await api("/api/usuarios", { method:"POST", body:{ usuario, nome, senha } });
+    $("#uUsuario").value = ""; $("#uNome").value = ""; $("#uSenha").value = "";
+    showMsg($("#uMsg"), `Usuário “${usuario}” criado. Ele entra pela mesma tela de login, com esse usuário e a senha.`, "ok");
+    listarUsuarios();
+  } catch (err) { showMsg($("#uMsg"), err.message); }
+});
+async function listarUsuarios(){
+  const box = $("#usLista");
+  try {
+    const r = await api("/api/usuarios");
+    box.innerHTML = "";
+    if (!r.usuarios.length){ box.innerHTML = `<div class="empty">Nenhum usuário de consulta. Use o formulário acima.</div>`; return; }
+    r.usuarios.forEach(u => {
+      const el = document.createElement("div"); el.className = "posto" + (u.ativo ? "" : " inativo");
+      el.innerHTML = `
+        <div class="row" style="justify-content:space-between"><div><b class="pn"></b><div class="mono hint pc"></div></div><button data-a="ativo"></button></div>
+        <div class="row"><input type="text" class="e-nome" maxlength="60" aria-label="Nome"><button data-a="nome">Salvar nome</button></div>
+        <div class="row"><input type="text" placeholder="Nova senha" aria-label="Nova senha" autocomplete="off" class="e-senha"><button data-a="senha">Alterar senha</button></div>
+        <div class="msg" hidden></div>`;
+      el.querySelector(".pn").textContent = u.nome + (u.ativo ? "" : " (desativado)");
+      el.querySelector(".pc").textContent = `Usuário: ${u.usuario} · consulta · criado em ${brtTexto(brt(new Date(u.criado_em)))}`;
+      const msg = el.querySelector(".msg"), iN = el.querySelector(".e-nome"); iN.value = u.nome;
+      const bA = el.querySelector('[data-a="ativo"]'); bA.textContent = u.ativo ? "Desativar" : "Reativar";
+      bA.onclick = async () => { try { await api(`/api/usuarios/${u.id}`, { method:"PUT", body:{ nome: u.nome, ativo: !u.ativo } }); listarUsuarios(); } catch (e) { showMsg(msg, e.message); } };
+      el.querySelector('[data-a="nome"]').onclick = async () => { try { await api(`/api/usuarios/${u.id}`, { method:"PUT", body:{ nome: iN.value, ativo: !!u.ativo } }); listarUsuarios(); } catch (e) { showMsg(msg, e.message); } };
+      el.querySelector('[data-a="senha"]').onclick = async () => {
+        const s = el.querySelector(".e-senha");
+        if (s.value.length < 6) return showMsg(msg, "A senha precisa ter pelo menos 6 caracteres.");
+        try { await api(`/api/usuarios/${u.id}/senha`, { method:"PUT", body:{ senha: s.value } }); s.value = ""; showMsg(msg, "Senha alterada. O usuário precisa entrar de novo.", "ok"); }
+        catch (e) { showMsg(msg, e.message); }
+      };
+      box.appendChild(el);
+    });
+  } catch (e) { box.innerHTML = ""; alertaErro(box, e.message); }
 }
 
 /* ---------- início ---------- */

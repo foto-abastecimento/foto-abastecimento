@@ -9,6 +9,7 @@
 <link rel="stylesheet" href="styles.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body>
 
@@ -20,7 +21,7 @@
     <div class="brand"><div class="pump" aria-hidden="true">F</div><h1>Foto Abastecimento</h1></div>
     <p class="hint" style="margin:0 0 18px">Registro fotográfico de abastecimento. O acesso de cada posto é criado pela matriz.</p>
     <form id="fEntrar" class="stack" autocomplete="off">
-      <div><label for="lUsuario">CNPJ do posto</label><input id="lUsuario" class="mono" placeholder="00.000.000/0000-00" autocapitalize="none" required></div>
+      <div><label for="lUsuario">CNPJ do posto ou usuário da matriz</label><input id="lUsuario" class="mono" placeholder="00.000.000/0000-00" autocapitalize="none" autocomplete="username" required></div>
       <div><label for="lSenha">Senha</label><input id="lSenha" type="password" required></div>
       <div id="lMsg" class="msg err" hidden></div>
       <button class="primary big" type="submit" id="lBtn">Entrar</button>
@@ -32,7 +33,7 @@
 <section id="posto" hidden>
   <header class="top gut">
     <div class="top-in">
-      <div class="store"><b id="hNome">—</b><span class="mono hint" id="hCnpj">—</span></div>
+      <div class="store"><b id="hNome">—</b><span class="mono hint"><span id="hCnpj">—</span> <span id="hIP"></span></span></div>
       <div class="clock">Horário de Brasília: <span class="mono clockTxt">--/--/---- --:--:--</span></div>
       <button class="sair">Sair</button>
     </div>
@@ -108,11 +109,12 @@
 <section id="admin" hidden>
   <header class="top gut">
     <div class="top-in">
-      <div class="store"><b>Portal da matriz</b><span class="hint">Acesso administrador</span></div>
+      <div class="store"><b>Portal da matriz</b><span class="hint" id="aQuem">Acesso administrador</span></div>
       <nav class="abas" role="tablist">
         <button role="tab" data-aba="fotos" aria-selected="true">Fotos</button>
         <button role="tab" data-aba="alertas" aria-selected="false">Alertas <span class="badge-n alerta-n" id="nAlertas" hidden>0</span></button>
         <button role="tab" data-aba="postos" aria-selected="false">Postos</button>
+        <button role="tab" data-aba="usuarios" aria-selected="false" class="so-admin">Usuários</button>
       </nav>
       <button class="sair">Sair</button>
     </div>
@@ -122,7 +124,7 @@
   <main class="admin-main gut">
     <section class="panel stack" data-painel="fotos">
       <div class="row" style="justify-content:space-between"><h2>Fotos de todos os postos</h2><span class="count" id="aCount"></span></div>
-      <input id="aBusca" placeholder="Buscar por cliente, CNPJ/CPF, nota, motorista ou posto" aria-label="Buscar">
+      <input id="aBusca" placeholder="Buscar por cliente, CNPJ/CPF, nota, motorista, posto, IP ou hash" aria-label="Buscar">
       <div class="filtros">
         <div><label for="aPosto">Posto</label><select id="aPosto"><option value="">Todos</option></select></div>
         <div><label for="aCli">Cliente da nota</label><select id="aCli"><option value="">Todos</option></select></div>
@@ -131,23 +133,30 @@
         <div><label for="aAte">Data até</label><input id="aAte" type="date"></div>
         <div class="fim"><button id="aLimpar">Limpar filtros</button></div>
       </div>
-      <div class="row"><button id="aZip" class="primary">Baixar resultado (.zip)</button><span class="hint" id="aZipInfo"></span></div>
+      <div class="row"><button id="aExcel" class="primary">Relatório Excel</button><button id="aZip">Baixar fotos e notas (.zip)</button><span class="hint" id="aZipInfo"></span></div>
       <div id="aMsg" class="msg" hidden></div>
       <div class="list grade" id="aLista"></div>
     </section>
 
-    <section class="panel stack" data-painel="alertas" hidden>
-      <div class="row" style="justify-content:space-between">
-        <h2>Alertas de erros</h2>
-        <label class="check"><input type="checkbox" id="alTodos"> Mostrar também os já vistos</label>
+    <section class="stack" data-painel="alertas" hidden>
+      <div class="panel stack">
+        <div class="row" style="justify-content:space-between"><h2>Semáforo de IP por posto</h2><span class="hint">Últimos 5 envios de cada posto</span></div>
+        <p class="hint" style="margin:0">Verde: mesmo IP em pelo menos 3 envios seguidos. Vermelho: o IP mudou entre os últimos envios (não bloqueia o posto). Cinza: poucos envios para avaliar.</p>
+        <div class="list" id="semLista"></div>
       </div>
-      <p class="hint" style="margin:0">Tentativas bloqueadas por horário: hora da saída da nota mais de 10 minutos antes ou depois da foto, ou nota sem horário legível. Número de nota digitado errado não gera alerta.</p>
-      <div class="list" id="alLista"></div>
+      <div class="panel stack">
+        <div class="row" style="justify-content:space-between">
+          <h2>Alertas de erros</h2>
+          <label class="check"><input type="checkbox" id="alTodos"> Mostrar também os já vistos</label>
+        </div>
+        <p class="hint" style="margin:0">Tentativas bloqueadas por horário (hora da saída da nota a mais de 10 minutos da foto, ou nota sem horário legível), com a foto e o PDF enviados, e envios feitos de um IP diferente do anterior. Número de nota digitado errado não gera alerta.</p>
+        <div class="list" id="alLista"></div>
+      </div>
     </section>
 
     <section class="panel stack" data-painel="postos" hidden>
       <h2>Postos cadastrados</h2>
-      <form id="fNovoPosto" class="stack nf" autocomplete="off">
+      <form id="fNovoPosto" class="stack nf so-admin" autocomplete="off">
         <b>Cadastrar posto</b>
         <div class="fields3">
           <div><label for="nCnpj">CNPJ do posto</label><input id="nCnpj" class="mono" placeholder="00.000.000/0000-00" required></div>
@@ -159,11 +168,28 @@
       </form>
       <div class="list" id="psLista"></div>
     </section>
+
+    <section class="panel stack" data-painel="usuarios" hidden>
+      <h2>Usuários de consulta da matriz</h2>
+      <p class="hint" style="margin:0">Usuários de consulta veem fotos, alertas e postos, e baixam fotos, notas e relatórios. Não cadastram nem alteram postos, usuários ou alertas. Usuários não são excluídos: são desativados, para manter o histórico.</p>
+      <form id="fNovoUsuario" class="stack nf" autocomplete="off">
+        <b>Criar usuário</b>
+        <div class="fields3">
+          <div><label for="uUsuario">Usuário (para entrar)</label><input id="uUsuario" class="mono" maxlength="30" placeholder="ex.: maria.silva" autocapitalize="none" required></div>
+          <div><label for="uNome">Nome da pessoa</label><input id="uNome" maxlength="60" required></div>
+          <div><label for="uSenha">Senha</label><input id="uSenha" type="text" minlength="6" required autocomplete="off"></div>
+        </div>
+        <div><button class="primary" type="submit">Criar usuário</button></div>
+        <div id="uMsg" class="msg" hidden></div>
+      </form>
+      <div class="list" id="usLista"></div>
+    </section>
   </main>
 </section>
 
-<div class="viewer" id="viewer" hidden><img id="viewImg" alt="Foto ampliada"><span class="mono" id="viewName"></span><button id="viewClose">Fechar</button></div>
+<div class="viewer" id="viewer" hidden><img id="viewImg" alt="Foto ampliada"><span class="mono" id="viewName"></span><span class="mono" id="viewHash"></span><button id="viewClose">Fechar</button></div>
 
+<script src="leitura-nf.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
