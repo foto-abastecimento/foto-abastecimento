@@ -95,7 +95,7 @@ Roda num único servidor Node.js, sem dependências externas. O banco é SQLite 
   - cadastros e alterações de postos e usuários (com o antes e o depois) e desbloqueios;
   - alertas marcados como vistos;
   - bloqueios;
-  - cada vez que um posto abre uma foto.
+  - aberturas de foto pelo posto feitas antes da miniatura borrada (ficam no histórico).
 - **Posto vê só miniatura borrada (LGPD).**
   - Na captura, o navegador gera uma miniatura de 160 px muito borrada: rosto, placa e textos do carimbo ficam ilegíveis.
   - A miniatura é guardada separada, e só ela vai para o banco do posto, junto com cliente, data/hora, nota, CNPJ/CPF e motorista.
