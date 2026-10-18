@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Foto Abastecimento</title>
+<title>Portal Foto Abastecimento</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@600;700&family=JetBrains+Mono:wght@500;700&display=swap">
 <link rel="stylesheet" href="styles.css">
@@ -18,8 +18,14 @@
 <!-- ============ LOGIN ============ -->
 <section id="login" class="gut" hidden>
   <div class="login-card">
-    <div class="brand"><div class="pump" aria-hidden="true">F</div><h1>Foto Abastecimento</h1></div>
-    <p class="hint" style="margin:0 0 18px">Registro fotográfico de abastecimento. O acesso de cada posto é criado pela matriz.</p>
+    <div class="login-marca">
+      <picture>
+        <source srcset="logo-delta-branca.png" media="(prefers-color-scheme: dark)">
+        <img src="logo-delta.png" alt="Delta" width="342" height="194">
+      </picture>
+      <h1>Portal Foto Abastecimento</h1>
+      <p class="hint">Registro fotográfico de abastecimento. O acesso de cada posto é criado pela matriz.</p>
+    </div>
     <form id="fEntrar" class="stack" autocomplete="off">
       <div><label for="lUsuario">CNPJ do posto ou usuário da matriz</label><input id="lUsuario" class="mono" placeholder="00.000.000/0000-00" autocapitalize="none" autocomplete="username" required></div>
       <div><label for="lSenha">Senha</label><input id="lSenha" type="password" required></div>

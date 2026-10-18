@@ -46,7 +46,7 @@ async function api(caminho, opts = {}){
     // resposta que não veio do servidor do sistema: _worker.js inativo ou erro da plataforma
     throw Object.assign(new Error(`O servidor do sistema não respondeu (HTTP ${r.status}). Abra ${location.origin}/api/status para conferir.`), { status: r.status });
   }
-  if (r.status === 401 && caminho !== "/api/login"){ irLogin("Sua sessão expirou. Entre de novo."); throw Object.assign(new Error(dados.erro || "Sessão expirada."), { status: 401 }); }
+  if (r.status === 401 && caminho !== "/api/login"){ irLogin(opts.silencioso ? "" : "Sua sessão expirou. Entre de novo."); throw Object.assign(new Error(dados.erro || "Sessão expirada."), { status: 401 }); }
   if (!r.ok) throw Object.assign(new Error(dados.erro || "Erro no servidor."), { status: r.status, dados });
   return dados;
 }
@@ -86,7 +86,7 @@ $("#fEntrar").addEventListener("submit", async e => {
 
 async function iniciar(){
   let me;
-  try { me = await api("/api/me"); } catch (e) { if (e.status !== 401) { mostrar("#login"); showMsg($("#lMsg"), e.message); } return; }
+  try { me = await api("/api/me", { silencioso: true }); } catch (e) { if (e.status !== 401) { mostrar("#login"); showMsg($("#lMsg"), e.message); } return; }
   if (!me || !me.papel){ mostrar("#login"); return showMsg($("#lMsg"), `Resposta inesperada do servidor. Abra ${location.origin}/api/status.`); }
   await sincronizar();
   if (me.papel === "admin" || me.papel === "consulta") entrarAdmin(me); else entrarPosto(me.posto);

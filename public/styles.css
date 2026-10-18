@@ -41,6 +41,11 @@ button.big{font-size:1.15rem;padding:15px 20px;width:100%}
 #login{display:grid;place-items:center;min-height:100vh;padding-block:28px}
 .login-card{width:100%;max-width:400px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:26px}
 .brand{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.login-marca{display:flex;flex-direction:column;align-items:center;text-align:center;gap:8px;margin-bottom:22px;padding-bottom:20px;border-bottom:1px solid var(--line)}
+.login-marca picture{display:block;width:min(220px,70%);margin:0 auto 6px}
+.login-marca img{display:block;width:100%;height:auto}
+.login-marca h1{font-size:1.75rem;line-height:1.15}
+.login-marca .hint{margin:0;max-width:30ch}
 .pump{width:34px;height:34px;flex:none;border-radius:6px;background:var(--accent);display:grid;place-items:center;color:var(--accent-fg);font:700 1.1rem var(--display)}
 
 /* cabeçalho */
