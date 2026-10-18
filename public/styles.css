@@ -138,6 +138,7 @@ body.nao-admin .req-admin, body.sem-baixar .req-baixar, body.sem-alertas .req-al
 .bloq{color:var(--danger);font-size:.85rem;font-weight:600;margin-top:2px}
 .item-posto{grid-template-columns:72px minmax(0,1fr)}
 .foto-ph{width:72px;height:54px;border-radius:6px;border:1px dashed var(--line);display:grid;place-items:center;color:var(--muted);font:700 .65rem var(--body);letter-spacing:.1em;background:var(--bg)}
+.item img.mini-borrada{width:72px;height:54px;object-fit:cover;border-radius:6px;cursor:default;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;pointer-events:none}
 .viewer.protegido img{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 .rg-tabela{overflow-x:auto;border:1px solid var(--line);border-radius:8px}
 .rg-tabela table{width:100%;border-collapse:collapse;font-size:.85rem}

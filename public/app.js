@@ -96,7 +96,21 @@ async function iniciar(){
    PORTAL DO POSTO
    ===================================================================== */
 let posto = null, meuIP = "";
-async function atualizarIP(){ try { meuIP = (await api("/api/ip")).ip || ""; } catch {} $("#hIP").textContent = meuIP ? "IP " + meuIP : ""; return meuIP; }
+// o IP vai só para o carimbo da foto; não aparece na tela do posto
+async function atualizarIP(){ try { meuIP = (await api("/api/ip")).ip || ""; } catch {} return meuIP; }
+// miniatura borrada (LGPD): reduz a foto a 16 px de largura e amplia de novo,
+// assim rosto, placa e textos do carimbo ficam ilegíveis
+async function miniBorrada(cvOrig){
+  const pw = 16, ph = Math.max(1, Math.round(16 * cvOrig.height / cvOrig.width));
+  const pq = document.createElement("canvas"); pq.width = pw; pq.height = ph;
+  const c1 = pq.getContext("2d"); c1.imageSmoothingEnabled = true; c1.imageSmoothingQuality = "high";
+  c1.drawImage(cvOrig, 0, 0, pw, ph);
+  const W = 160, H = Math.round(160 * cvOrig.height / cvOrig.width);
+  const gd = document.createElement("canvas"); gd.width = W; gd.height = H;
+  const c2 = gd.getContext("2d"); c2.imageSmoothingEnabled = true; c2.imageSmoothingQuality = "high";
+  c2.drawImage(pq, 0, 0, W, H);
+  return await new Promise(r => gd.toBlob(r, "image/jpeg", 0.7));
+}
 setInterval(() => { if (posto && !$("#posto").hidden) atualizarIP(); }, 5 * 60 * 1000);
 function entrarPosto(p){
   posto = p;
@@ -330,8 +344,9 @@ $("#btnFoto").onclick = async () => {
     ctx.fillText(cortar(ctx, t, w-pad*2), pad, h-bandH+pad+i*lh);
   });
   const blob = await new Promise(r => cv.toBlob(r, "image/jpeg", 0.9));
+  let mini = null; try { mini = await miniBorrada(cv); } catch {}
   if (pendente) URL.revokeObjectURL(pendente.url);
-  pendente = { blob, url: URL.createObjectURL(blob), capturadoMs: quando.getTime(), brasilia: brtTexto(p), nota, cliente, ip };
+  pendente = { blob, mini, url: URL.createObjectURL(blob), capturadoMs: quando.getTime(), brasilia: brtTexto(p), nota, cliente, ip };
   $("#preview").src = pendente.url; $("#preview").hidden = false; video.hidden = true;
   $("#capActions").hidden = true; $("#revActions").hidden = false;
   atualizaBotao();
@@ -364,6 +379,7 @@ $("#btnSalvar").onclick = async () => {
   const fd = new FormData();
   fd.append("foto", pendente.blob, "foto.jpg");
   fd.append("nf", nf.arquivo, "nota.pdf");
+  if (pendente.mini) fd.append("mini", pendente.mini, "mini.jpg");
   fd.append("meta", JSON.stringify({
     cliente: pendente.cliente, nota: pendente.nota, capturadoEm: new Date(pendente.capturadoMs).toISOString(), ipCarimbo: pendente.ip || "",
     destNome, destDoc, destOrigem: editado ? "editado à mão" : "lido do PDF",
@@ -427,9 +443,14 @@ function abrirViewer(src, titulo, hash, protegido){
 }
 function montaItem(f, ehMatriz){
   const el = document.createElement("div"); el.className = "item" + (ehMatriz ? "" : " item-posto");
-  el.innerHTML = `${ehMatriz ? `<img alt="" loading="lazy">` : `<div class="foto-ph" aria-hidden="true"><span>FOTO</span></div>`}<div style="min-width:0"><div class="cli"></div><div class="when"></div><div class="meta"></div><div class="meta seg"></div><div class="row"><button data-a="ver">Ver foto</button></div></div>`;
+  // posto: só a miniatura borrada (envios antigos, sem miniatura, mostram só o registro)
+  const fig = ehMatriz ? `<img alt="" loading="lazy">`
+    : f.tem_mini ? `<img class="mini-borrada" alt="Miniatura borrada" loading="lazy" draggable="false">`
+    : `<div class="foto-ph" aria-hidden="true"><span>FOTO</span></div>`;
+  el.innerHTML = `${fig}<div style="min-width:0"><div class="cli"></div><div class="when"></div><div class="meta"></div><div class="meta seg"></div><div class="row">${ehMatriz ? `<button data-a="ver">Ver foto</button>` : ""}</div></div>`;
   const src = `/api/fotos/${f.id}/foto`;
   if (ehMatriz) el.querySelector("img").src = src;
+  else if (f.tem_mini){ const im = el.querySelector("img"); im.src = `/api/fotos/${f.id}/mini`; im.oncontextmenu = e => e.preventDefault(); }
   el.querySelector(".cli").textContent = f.dest_nome || f.cliente;
   el.querySelector(".when").textContent = f.capturado_txt;
   const meta = el.querySelector(".meta");
@@ -453,12 +474,9 @@ function montaItem(f, ehMatriz){
     if (f.divergencia){ const d = document.createElement("div"); d.className = "diverg"; d.textContent = "⚠ " + f.divergencia; seg.appendChild(d); }
     if (f.hash_foto) seg.title = `Hash SHA-256 da foto: ${f.hash_foto}` + (f.hash_nf ? `\nHash SHA-256 da NF: ${f.hash_nf}` : "");
   } else seg.remove();
-  // posto: a foto só carrega ao abrir (cada abertura fica registrada) e não pode ser baixada
-  const ver = () => ehMatriz
-    ? abrirViewer(src, f.arquivo, f.hash_foto, false)
-    : abrirViewer(`${src}?abrir=${Date.now()}`, `${f.dest_nome || f.cliente} · ${f.capturado_txt}`, "", true);
-  el.querySelector('[data-a="ver"]').onclick = ver;
   if (ehMatriz){
+    const ver = () => abrirViewer(src, f.arquivo, f.hash_foto, false);
+    el.querySelector('[data-a="ver"]').onclick = ver;
     el.querySelector("img").onclick = ver;
     if (tenho("baixar")){
       const row = el.querySelector(".row");

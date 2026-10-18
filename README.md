@@ -44,7 +44,7 @@ Roda num único servidor Node.js, sem dependências externas. O banco é SQLite 
   - cliente da nota;
   - emissão até 10 minutos antes ou depois da foto.
 - **Fora do horário:** o envio é bloqueado com a mensagem "entre em contato com a matriz", e um alerta aparece no portal da matriz. Número de nota digitado errado não gera alerta.
-- **Downloads:** o posto só visualiza as fotos. A matriz baixa fotos, notas e .zip.
+- **Downloads:** o posto não abre nem baixa fotos e notas já enviadas. A matriz baixa fotos, notas e .zip.
 - **Nome dos arquivos:** `NOTA_AAAA-MM-DD_HH-MM-SS.jpg` / `.pdf`, no horário de Brasília.
 
 ## Segurança e auditoria
@@ -59,6 +59,7 @@ Roda num único servidor Node.js, sem dependências externas. O banco é SQLite 
 - **Leitor de PDF próprio** (`pdf-texto.mjs`), sem dependências. Lê PDFs compactados, com object streams e protegidos com senha vazia (RC4 e AES-128/256).
 - **IP:**
   - o IP do envio sai no carimbo da foto e fica gravado;
+  - o posto não vê o próprio IP na tela de acesso;
   - atrás do proxy do Railway, vale o último IP público do `X-Forwarded-For`;
   - o IP é o da internet do posto, não o de cada computador.
 - **Controle de IP pelo login do posto.**
@@ -95,7 +96,11 @@ Roda num único servidor Node.js, sem dependências externas. O banco é SQLite 
   - alertas marcados como vistos;
   - bloqueios;
   - cada vez que um posto abre uma foto.
-- **Posto só visualiza.** No banco do posto, a foto só carrega quando ele clica em "Ver foto". Ela abre na tela, sem download e sem ficar guardada no navegador, e cada abertura é registrada.
+- **Posto vê só miniatura borrada (LGPD).**
+  - Na captura, o navegador gera uma miniatura de 160 px muito borrada: rosto, placa e textos do carimbo ficam ilegíveis.
+  - A miniatura é guardada separada, e só ela vai para o banco do posto, junto com cliente, data/hora, nota, CNPJ/CPF e motorista.
+  - A foto original e a nota só abrem para a matriz.
+  - Envios feitos antes desta versão não têm miniatura e aparecem só como registro.
 - **Erros sem detalhes técnicos.** O usuário vê uma mensagem simples com um código. O detalhe fica só no log do servidor, com o mesmo código. `/api/status` só abre para o admin logado.
 - **Nada é apagado:** a atualização do banco só acrescenta colunas e tabelas.
 

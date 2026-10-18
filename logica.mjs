@@ -12,6 +12,7 @@ const LIMITE_NOTA_MIN = 10;      // diferença máxima entre o horário da nota 
 const LIMITE_ENVIO_MIN = 20;     // diferença máxima entre a foto e a chegada no servidor
 const MAX_FOTO = 8 * 1024 * 1024;
 const MAX_PDF = 10 * 1024 * 1024;
+const MAX_MINI = 80 * 1024;
 const SESSAO_HORAS = 12;
 const JANELA_IP = 5;             // semáforo de IP: últimos 5 logins do posto
 const MIN_IP_VERDE = 3;          // pelo menos 3 logins no mesmo IP para ficar verde
@@ -92,7 +93,7 @@ function ipCliente(request) {
 /* ---------- banco: criação e migração (só acrescenta) ---------- */
 let preparo = null;
 const COLUNAS_NOVAS = {
-  fotos: { ip: "TEXT", ip_carimbo: "TEXT", hash_foto: "TEXT", hash_nf: "TEXT", verif_servidor: "TEXT", nf_chave: "TEXT", divergencia: "TEXT", dest_nome_pdf: "TEXT", dest_doc_pdf: "TEXT" },
+  fotos: { ip: "TEXT", ip_carimbo: "TEXT", hash_foto: "TEXT", hash_nf: "TEXT", verif_servidor: "TEXT", nf_chave: "TEXT", divergencia: "TEXT", dest_nome_pdf: "TEXT", dest_doc_pdf: "TEXT", chave_mini: "TEXT" },
   alertas: { ip: "TEXT", ip_anterior: "TEXT", chave_foto: "TEXT", chave_nf: "TEXT", hash_foto: "TEXT", hash_nf: "TEXT", origem: "TEXT" },
   // usuários que já existiam (antigo "consulta") mantêm o que já faziam: baixar e ver alertas
   usuarios: { perm_baixar: "INTEGER NOT NULL DEFAULT 1", perm_alertas: "INTEGER NOT NULL DEFAULT 1", perm_postos: "INTEGER NOT NULL DEFAULT 0", perm_usuarios: "INTEGER NOT NULL DEFAULT 0" }
@@ -427,15 +428,21 @@ async function api(request, env, url) {
   }
   if (caminho === "/api/opcoes" && metodo === "GET") return await opcoes(env, s);
 
-  let m = caminho.match(/^\/api\/fotos\/(\d+)\/(foto|nf)$/);
+  let m = caminho.match(/^\/api\/fotos\/(\d+)\/mini$/);
+  if (m && metodo === "GET") {
+    // miniatura borrada: é a única imagem que o posto vê depois do envio
+    const f = await env.DB.prepare("SELECT posto_id, chave_mini FROM fotos WHERE id = ?").bind(+m[1]).first();
+    if (!f || !f.chave_mini || (s.posto && f.posto_id !== s.posto.id)) return erro("Miniatura não encontrada.", 404);
+    return await entregarArquivo(env, f.chave_mini, "miniatura.jpg", false, false, { semCache: true });
+  }
+
+  m = caminho.match(/^\/api\/fotos\/(\d+)\/(foto|nf)$/);
   if (m && metodo === "GET") {
     const f = await env.DB.prepare("SELECT f.*, p.nome AS posto_nome FROM fotos f LEFT JOIN postos p ON p.id = f.posto_id WHERE f.id = ?").bind(+m[1]).first();
     if (!f || (s.posto && f.posto_id !== s.posto.id)) return erro("Foto não encontrada.", 404);
     if (s.posto) {
-      // posto só visualiza (nunca baixa) e cada abertura fica registrada
-      if (m[2] === "nf") return erro("A nota fiscal só pode ser acessada pela matriz.", 403);
-      await registrar(env, s, request, "posto_abriu_foto", `Abriu a foto ${f.arquivo} (nota ${f.nota}, ${f.capturado_txt})`, { alvo: "foto:" + f.id, dedupSeg: 30 });
-      return await entregarArquivo(env, f.chave_foto, f.arquivo, false, false, { semCache: true });
+      // LGPD: depois do envio o posto não acessa a foto nem a nota; vê só a miniatura borrada
+      return erro("A foto original só pode ser acessada pela matriz.", 403);
     }
     const baixar = url.searchParams.get("download") === "1" || m[2] === "nf";
     if (baixar) {
@@ -691,7 +698,7 @@ async function receberAlerta(request, env, posto) {
 /* ---------- envio da foto + nota (validações no servidor) ---------- */
 async function receberFoto(request, env, posto) {
   let form; try { form = await request.formData(); } catch { return erro("Envio inválido."); }
-  const foto = form.get("foto"), nf = form.get("nf");
+  const foto = form.get("foto"), nf = form.get("nf"), mini = form.get("mini");
   let m; try { m = JSON.parse(form.get("meta") || "{}"); } catch { return erro("Dados do envio inválidos."); }
 
   const cliente = String(m.cliente || "").trim().slice(0, 60);
@@ -767,19 +774,28 @@ async function receberFoto(request, env, posto) {
   const chaveFoto = `postos/${posto.id}/${id}.jpg`, chaveNf = `postos/${posto.id}/${id}.pdf`;
   await env.FILES.put(chaveFoto, bytesFoto, { httpMetadata: { contentType: "image/jpeg" } });
   await env.FILES.put(chaveNf, bytesNf, { httpMetadata: { contentType: "application/pdf" } });
+  // miniatura borrada (opcional): JPEG pequeno gerado na captura
+  let chaveMini = null;
+  if (mini instanceof File && mini.size && mini.size <= MAX_MINI) {
+    const bm = new Uint8Array(await mini.arrayBuffer());
+    if (bm[0] === 0xFF && bm[1] === 0xD8 && bm[2] === 0xFF) {
+      chaveMini = `postos/${posto.id}/${id}_mini.jpg`;
+      await env.FILES.put(chaveMini, bm, { httpMetadata: { contentType: "image/jpeg" } });
+    }
+  }
 
   const tipo = destDoc.length === 14 ? "PJ" : destDoc.length === 11 ? "PF" : "NI";
   await env.DB.prepare(`INSERT INTO fotos (posto_id, cliente, nota, arquivo, arquivo_nf, chave_foto, chave_nf, capturado_em, capturado_txt, cap_dia, recebido_em,
       dest_nome, dest_doc, dest_tipo, dest_origem, nf_numero, nf_serie, nf_modelo, nf_cnpj_emit, nf_emissao, nf_emissao_fonte, dif_min, cnpj_na_epoca, nome_na_epoca,
-      ip, ip_carimbo, hash_foto, hash_nf, verif_servidor, nf_chave, divergencia, dest_nome_pdf, dest_doc_pdf)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+      ip, ip_carimbo, hash_foto, hash_nf, verif_servidor, nf_chave, divergencia, dest_nome_pdf, dest_doc_pdf, chave_mini)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
     posto.id, cliente, nota, arquivo, arquivoNf, chaveFoto, chaveNf, new Date(cap).toISOString(), capBR.texto, capBR.dia, agoraISO(),
     destNome, destDoc || null, tipo, m.destOrigem === "editado à mão" ? "editado à mão" : "lido do PDF",
     numeroNota, corta(lido ? lido.serie : n.serie, 5), corta(lido ? lido.modelo : n.modelo, 10),
     (lido ? lido.cnpjEmit : n.cnpjEmit) ? normCNPJ(lido ? lido.cnpjEmit : n.cnpjEmit) : null, emissaoTxt, corta(emissao.fonte, 60),
     Math.round(dif * 10) / 10, posto.cnpj, posto.nome,
     ip, ipCarimbo, hashFoto, hashNf, verif, lido && lido.chave ? lido.chave : null, divergencias.length ? divergencias.join("; ").slice(0, 500) : null,
-    lido && lido.dest ? corta(lido.dest.nome, 100) : null, lido && lido.dest ? corta(lido.dest.doc, 14) : null).run();
+    lido && lido.dest ? corta(lido.dest.nome, 100) : null, lido && lido.dest ? corta(lido.dest.doc, 14) : null, chaveMini).run();
 
   return json({ ok: true, arquivo, arquivoNf, hashFoto, verificacao: verif });
 }
@@ -815,7 +831,7 @@ async function listarFotos(env, s, q) {
   const total = await env.DB.prepare(`SELECT COUNT(*) AS n FROM fotos f LEFT JOIN postos p ON p.id = f.posto_id ${where}`).bind(...args).first();
   const r = await env.DB.prepare(`SELECT f.id, f.posto_id, f.cliente, f.nota, f.arquivo, f.arquivo_nf, f.capturado_txt, f.cap_dia, f.recebido_em,
       f.dest_nome, f.dest_doc, f.dest_tipo, f.dest_origem, f.nf_emissao, f.nf_emissao_fonte, f.dif_min, f.nf_serie, f.nf_modelo, f.nf_cnpj_emit, f.nf_chave,
-      f.ip, f.ip_carimbo, f.hash_foto, f.hash_nf, f.verif_servidor, f.divergencia,
+      f.ip, f.ip_carimbo, f.hash_foto, f.hash_nf, f.verif_servidor, f.divergencia, (f.chave_mini IS NOT NULL) AS tem_mini,
       p.nome AS posto_nome, p.cnpj AS posto_cnpj
       FROM fotos f LEFT JOIN postos p ON p.id = f.posto_id ${where} ORDER BY f.capturado_em DESC LIMIT ${limite}`).bind(...args).all();
   const ocultarDoPosto = ["arquivo_nf", "ip", "ip_carimbo", "hash_foto", "hash_nf", "verif_servidor", "divergencia", "nf_chave", "nf_cnpj_emit", "recebido_em"];
