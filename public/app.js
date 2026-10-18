@@ -43,11 +43,11 @@ async function api(caminho, opts = {}){
   const ehJson = (r.headers.get("content-type") || "").includes("application/json");
   const dados = ehJson ? await r.json().catch(() => ({})) : {};
   if (!ehJson && !(opts.method === undefined && caminho.startsWith("/api/fotos/"))){
-    // resposta que não veio do servidor do sistema: _worker.js inativo ou erro da plataforma
-    throw Object.assign(new Error(`O servidor do sistema não respondeu (HTTP ${r.status}). Abra ${location.origin}/api/status para conferir.`), { status: r.status });
+    // resposta que não veio do sistema (servidor fora do ar ou reiniciando)
+    throw Object.assign(new Error("O sistema está indisponível no momento. Tente de novo em instantes."), { status: r.status });
   }
   if (r.status === 401 && caminho !== "/api/login"){ irLogin(opts.silencioso ? "" : "Sua sessão expirou. Entre de novo."); throw Object.assign(new Error(dados.erro || "Sessão expirada."), { status: 401 }); }
-  if (!r.ok) throw Object.assign(new Error(dados.erro || "Erro no servidor."), { status: r.status, dados });
+  if (!r.ok) throw Object.assign(new Error(dados.erro || "Não foi possível concluir agora. Tente de novo em instantes."), { status: r.status, dados });
   return dados;
 }
 
@@ -87,9 +87,9 @@ $("#fEntrar").addEventListener("submit", async e => {
 async function iniciar(){
   let me;
   try { me = await api("/api/me", { silencioso: true }); } catch (e) { if (e.status !== 401) { mostrar("#login"); showMsg($("#lMsg"), e.message); } return; }
-  if (!me || !me.papel){ mostrar("#login"); return showMsg($("#lMsg"), `Resposta inesperada do servidor. Abra ${location.origin}/api/status.`); }
+  if (!me || !me.papel){ mostrar("#login"); return showMsg($("#lMsg"), "O sistema está indisponível no momento. Tente de novo em instantes."); }
   await sincronizar();
-  if (me.papel === "admin" || me.papel === "consulta") entrarAdmin(me); else entrarPosto(me.posto);
+  if (me.papel === "posto") entrarPosto(me.posto); else entrarAdmin(me);
 }
 
 /* =====================================================================
@@ -394,12 +394,23 @@ $("#pLimpar").onclick = () => { ["#pBusca","#pMes","#pCli","#pTipo"].forEach(s =
 
 /* ----- item do banco (comum) ----- */
 const curto = h => h ? h.slice(0, 12) + "…" : "";
+let meusPoderes = {}, ehAdmin = false;
+const tenho = p => ehAdmin || !!meusPoderes[p];
+function abrirViewer(src, titulo, hash, protegido){
+  const img = $("#viewImg");
+  img.src = src;
+  $("#viewName").textContent = titulo;
+  $("#viewHash").textContent = hash ? `Hash SHA-256 da foto: ${hash}` : "";
+  img.oncontextmenu = protegido ? (e => e.preventDefault()) : null;
+  img.draggable = !protegido;
+  $("#viewer").classList.toggle("protegido", !!protegido);
+  $("#viewer").hidden = false;
+}
 function montaItem(f, ehMatriz){
-  const el = document.createElement("div"); el.className = "item";
-  el.innerHTML = `<img alt="" loading="lazy"><div style="min-width:0"><div class="cli"></div><div class="when"></div><div class="meta"></div><div class="meta seg"></div><div class="row"><button data-a="ver">Ver foto</button></div></div>`;
+  const el = document.createElement("div"); el.className = "item" + (ehMatriz ? "" : " item-posto");
+  el.innerHTML = `${ehMatriz ? `<img alt="" loading="lazy">` : `<div class="foto-ph" aria-hidden="true"><span>FOTO</span></div>`}<div style="min-width:0"><div class="cli"></div><div class="when"></div><div class="meta"></div><div class="meta seg"></div><div class="row"><button data-a="ver">Ver foto</button></div></div>`;
   const src = `/api/fotos/${f.id}/foto`;
-  const img = el.querySelector("img"); img.src = src;
-  if (!ehMatriz){ img.addEventListener("contextmenu", e => e.preventDefault()); img.draggable = false; }
+  if (ehMatriz) el.querySelector("img").src = src;
   el.querySelector(".cli").textContent = f.dest_nome || f.cliente;
   el.querySelector(".when").textContent = f.capturado_txt;
   const meta = el.querySelector(".meta");
@@ -423,44 +434,51 @@ function montaItem(f, ehMatriz){
     if (f.divergencia){ const d = document.createElement("div"); d.className = "diverg"; d.textContent = "⚠ " + f.divergencia; seg.appendChild(d); }
     if (f.hash_foto) seg.title = `Hash SHA-256 da foto: ${f.hash_foto}` + (f.hash_nf ? `\nHash SHA-256 da NF: ${f.hash_nf}` : "");
   } else seg.remove();
-  const ver = () => {
-    $("#viewImg").src = src;
-    $("#viewName").textContent = ehMatriz ? f.arquivo : `${f.dest_nome || f.cliente} · ${f.capturado_txt}`;
-    $("#viewHash").textContent = ehMatriz && f.hash_foto ? `Hash SHA-256 da foto: ${f.hash_foto}` : "";
-    $("#viewImg").oncontextmenu = ehMatriz ? null : (e => e.preventDefault());
-    $("#viewer").hidden = false;
-  };
-  img.onclick = ver; el.querySelector('[data-a="ver"]').onclick = ver;
+  // posto: a foto só carrega ao abrir (cada abertura fica registrada) e não pode ser baixada
+  const ver = () => ehMatriz
+    ? abrirViewer(src, f.arquivo, f.hash_foto, false)
+    : abrirViewer(`${src}?abrir=${Date.now()}`, `${f.dest_nome || f.cliente} · ${f.capturado_txt}`, "", true);
+  el.querySelector('[data-a="ver"]').onclick = ver;
   if (ehMatriz){
-    const row = el.querySelector(".row");
-    const a1 = document.createElement("a"); a1.className = "btn"; a1.href = src + "?download=1"; a1.textContent = "Baixar foto"; row.appendChild(a1);
-    const a2 = document.createElement("a"); a2.className = "btn"; a2.href = `/api/fotos/${f.id}/nf`; a2.textContent = "Baixar NF"; row.appendChild(a2);
+    el.querySelector("img").onclick = ver;
+    if (tenho("baixar")){
+      const row = el.querySelector(".row");
+      const a1 = document.createElement("a"); a1.className = "btn"; a1.href = src + "?download=1"; a1.textContent = "Baixar foto"; row.appendChild(a1);
+      const a2 = document.createElement("a"); a2.className = "btn"; a2.href = `/api/fotos/${f.id}/nf`; a2.textContent = "Baixar NF"; row.appendChild(a2);
+    }
   }
   return el;
 }
-$("#viewClose").onclick = () => { $("#viewer").hidden = true; };
+$("#viewClose").onclick = () => { $("#viewer").hidden = true; $("#viewImg").removeAttribute("src"); };
+$("#viewImg").addEventListener("dragstart", e => { if ($("#viewer").classList.contains("protegido")) e.preventDefault(); });
 
 /* =====================================================================
-   PORTAL DA MATRIZ (admin e usuários de consulta)
+   PORTAL DA MATRIZ (admin e usuários da matriz, cada um com seus poderes)
    ===================================================================== */
-let ehAdmin = false;
 function entrarAdmin(me){
   posto = null;
   ehAdmin = me.papel === "admin";
-  document.body.classList.toggle("modo-consulta", !ehAdmin);
-  $("#aQuem").textContent = ehAdmin ? "Administrador" : `Consulta · ${me.nome || ""}`;
+  meusPoderes = me.perms || {};
+  const b = document.body.classList;
+  b.toggle("nao-admin", !ehAdmin);
+  ["baixar","alertas","postos","usuarios"].forEach(p => b.toggle("sem-" + p, !tenho(p)));
+  const lista = { baixar:"baixar", alertas:"alertas", postos:"postos", usuarios:"usuários" };
+  const tem = Object.keys(lista).filter(tenho).map(k => lista[k]);
+  $("#aQuem").textContent = ehAdmin ? "Administrador" : `${me.nome || ""} · ${tem.length ? "pode: " + tem.join(", ") : "somente visualizar"}`;
   $("#avisoSenha").hidden = !me.senhaPadrao;
   mostrar("#admin"); abrirAba("fotos");
   carregarOpcoesAdmin().then(listarAdmin);
-  contarAlertas();
+  if (tenho("alertas")) contarAlertas();
 }
 function abrirAba(aba){
-  if (aba === "usuarios" && !ehAdmin) aba = "fotos";
+  const permitido = { alertas: tenho("alertas"), usuarios: tenho("usuarios"), registros: ehAdmin };
+  if (permitido[aba] === false) aba = "fotos";
   $$(".abas button").forEach(b => b.setAttribute("aria-selected", b.dataset.aba === aba));
   $$("[data-painel]").forEach(p => p.hidden = p.dataset.painel !== aba);
   if (aba === "alertas") listarAlertas();
   if (aba === "postos") listarPostos();
   if (aba === "usuarios") listarUsuarios();
+  if (aba === "registros") listarRegistros();
   if (aba === "fotos") carregarOpcoesAdmin();
 }
 $$(".abas button").forEach(b => b.onclick = () => abrirAba(b.dataset.aba));
@@ -489,7 +507,7 @@ async function listarAdmin(){
     ultimaListaAdmin = r.fotos;
     $("#aCount").textContent = (r.total === r.geral ? `${r.geral} fotos` : `${r.total} de ${r.geral} fotos`) + (r.fotos.length < r.total ? ` (mostrando as ${r.fotos.length} mais recentes)` : "");
     $("#aZip").disabled = !r.fotos.length; $("#aExcel").disabled = !r.total;
-    $("#aZipInfo").textContent = r.fotos.length ? `${r.fotos.length} fotos e ${r.fotos.length} notas no .zip` : "";
+    $("#aZipInfo").textContent = r.fotos.length && tenho("baixar") ? `${r.fotos.length} fotos e ${r.fotos.length} notas no .zip` : "";
     lista.innerHTML = "";
     if (!r.fotos.length){ lista.innerHTML = `<div class="empty">${r.geral ? "Nenhuma foto com esses filtros." : "Nenhuma foto em nenhum posto ainda."}</div>`; return; }
     r.fotos.forEach(f => lista.appendChild(montaItem(f, true)));
@@ -507,27 +525,29 @@ const carimboArquivo = () => { const p = brt(agora()); return `${p.year}-${p.mon
 
 $("#aZip").onclick = async () => {
   const fotos = ultimaListaAdmin;
-  if (!fotos.length) return;
+  if (!fotos.length || !tenho("baixar")) return;
   if (!window.JSZip) return showMsg($("#aMsg"), "Não foi possível montar o .zip agora. Recarregue a página.");
   const btn = $("#aZip"); btn.disabled = true;
+  const lote = Date.now().toString(36) + Math.random().toString(36).slice(2, 8); // agrupa o .zip num único registro de ação
   try {
     const z = new JSZip();
     for (let i = 0; i < fotos.length; i++){
       const f = fotos[i];
       showMsg($("#aMsg"), `Montando o .zip: ${i+1} de ${fotos.length}…`, "ok");
       const pasta = `${normCNPJ(f.posto_cnpj || "")}_${(f.posto_nome || "posto").replace(/[\\/:*?"<>|]+/g,"-")}/`;
-      const [rf, rn] = await Promise.all([fetch(`/api/fotos/${f.id}/foto?download=1`, { credentials:"same-origin" }), fetch(`/api/fotos/${f.id}/nf`, { credentials:"same-origin" })]);
+      const [rf, rn] = await Promise.all([fetch(`/api/fotos/${f.id}/foto?download=1&lote=${lote}`, { credentials:"same-origin" }), fetch(`/api/fotos/${f.id}/nf?lote=${lote}`, { credentials:"same-origin" })]);
       if (rf.ok) z.file(pasta + f.arquivo, await rf.blob());
       if (rn.ok) z.file(pasta + f.arquivo_nf, await rn.blob());
     }
     baixarBlob(await z.generateAsync({ type:"blob" }), `fotos_matriz_${carimboArquivo()}.zip`);
     showMsg($("#aMsg"), "Arquivo .zip gerado.", "ok");
-  } catch (e) { showMsg($("#aMsg"), "Não foi possível gerar o .zip: " + e.message); }
+  } catch (e) { showMsg($("#aMsg"), "Não foi possível gerar o .zip agora. Tente de novo."); }
   finally { btn.disabled = false; }
 };
 
 /* ----- relatório Excel (respeita os filtros) ----- */
 $("#aExcel").onclick = async () => {
+  if (!tenho("baixar")) return;
   if (!window.XLSX) return showMsg($("#aMsg"), "O gerador de Excel não carregou. Recarregue a página.");
   const btn = $("#aExcel"); btn.disabled = true; showMsg($("#aMsg"), "Gerando o relatório…", "ok");
   try {
@@ -559,12 +579,13 @@ $("#aExcel").onclick = async () => {
     const out = XLSX.write(wb, { bookType:"xlsx", type:"array" });
     baixarBlob(new Blob([out], { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), `relatorio_foto_abastecimento_${carimboArquivo()}.xlsx`);
     showMsg($("#aMsg"), `Relatório gerado com ${linhas.length} registro(s).`, "ok");
-  } catch (e) { showMsg($("#aMsg"), "Não foi possível gerar o relatório: " + e.message); }
+  } catch (e) { showMsg($("#aMsg"), e.message || "Não foi possível gerar o relatório agora."); }
   finally { btn.disabled = false; }
 };
 
-/* ----- alertas + semáforo de IP ----- */
+/* ----- alertas + farol de IP ----- */
 async function contarAlertas(){
+  if (!tenho("alertas")) return;
   try { const r = await api("/api/alertas"); atualizarBadge(r); } catch {}
 }
 function atualizarBadge(r){
@@ -577,7 +598,6 @@ async function listarAlertas(){
   try {
     const r = await api("/api/alertas" + ($("#alTodos").checked ? "?todos=1" : ""));
     atualizarBadge(r);
-    // semáforo
     sem.innerHTML = "";
     if (!r.semaforo.length) sem.innerHTML = `<div class="empty">Nenhum posto cadastrado.</div>`;
     r.semaforo.forEach(x => {
@@ -587,10 +607,9 @@ async function listarAlertas(){
       el.querySelector(".luz").title = x.cor === "verde" ? "Sem alteração de IP" : x.cor === "vermelho" ? "IP alterado" : "Histórico insuficiente";
       el.querySelector(".pn").textContent = `${x.posto_nome} · CNPJ ${maskCNPJ(x.posto_cnpj)}`;
       el.querySelector(".tx").textContent = x.texto;
-      el.querySelector(".ips").textContent = x.logins.map(e => `${e.ip} (${e.quando})`).join("  ·  ");
+      el.querySelector(".ips").textContent = (x.logins || []).map(e => `${e.ip} (${e.quando})`).join("  ·  ");
       sem.appendChild(el);
     });
-    // alertas
     lista.innerHTML = "";
     if (!r.alertas.length){ lista.innerHTML = `<div class="empty">Nenhum alerta ${$("#alTodos").checked ? "registrado" : "em aberto"}.</div>`; return; }
     r.alertas.forEach(a => {
@@ -598,26 +617,27 @@ async function listarAlertas(){
       const el = document.createElement("div"); el.className = "al" + (a.visto ? " visto" : "") + (ehIP ? " ip" : "");
       el.innerHTML = `<div class="al-corpo"><div class="al-texto"><div class="row" style="justify-content:space-between"><div><span class="chip erro"></span> <b class="pn"></b></div><span class="mono hint quando"></span></div><div class="det d1"></div><div class="det d2"></div><div class="det d3"></div><div class="row acoes"></div></div></div>`;
       el.querySelector(".chip").textContent = a.tipo_txt;
-      el.querySelector(".pn").textContent = `${a.posto_nome || "Posto"} · CNPJ ${maskCNPJ(a.posto_cnpj || "")}`;
+      el.querySelector(".pn").textContent = a.posto_nome ? `${a.posto_nome} · CNPJ ${maskCNPJ(a.posto_cnpj || "")}` : "Matriz";
       el.querySelector(".quando").textContent = "Registrado em " + brtTexto(brt(new Date(a.criado_em)));
-      el.querySelector(".d1").textContent = a.tipo === "ip_login" ? "Login do posto" : `Nota ${a.nota || "?"} · Motorista: ${a.cliente || "?"} · Foto: ${a.foto_em || "?"}`;
+      el.querySelector(".d1").textContent = a.tipo === "ip_login" ? "Login do posto" : a.tipo === "bloqueio" ? "Tentativas de login" : `Nota ${a.nota || "?"} · Motorista: ${a.cliente || "?"} · Foto: ${a.foto_em || "?"}`;
       el.querySelector(".d2").textContent = a.tipo === "atraso"
         ? `Horário da nota ${a.emissao || "?"} · Diferença ${a.dif_min != null ? a.dif_min + " min" : "?"}${a.emissao_fonte ? " (" + a.emissao_fonte + ")" : ""}`
         : a.tipo === "ip_login" ? `IP do login anterior ${a.ip_anterior || "?"} → IP deste login ${a.ip || "?"} (acesso liberado)`
         : a.tipo === "ip_alterado" ? `IP anterior ${a.ip_anterior || "?"} → IP deste envio ${a.ip || "?"} (envio aceito)`
+        : a.tipo === "bloqueio" ? (a.detalhe || "Conta bloqueada por senhas erradas.")
         : "Horário da nota (hora da saída) não encontrado no PDF";
-      el.querySelector(".d3").textContent = [a.ip && !ehIP ? `IP ${a.ip}` : "", a.hash_foto ? `hash da foto ${curto(a.hash_foto)}` : ""].filter(Boolean).join(" · ");
+      el.querySelector(".d3").textContent = [a.ip && !ehIP && a.tipo !== "bloqueio" ? `IP ${a.ip}` : "", a.hash_foto ? `hash da foto ${curto(a.hash_foto)}` : ""].filter(Boolean).join(" · ");
       if (a.hash_foto) el.querySelector(".d3").title = `Hash SHA-256 da foto: ${a.hash_foto}` + (a.hash_nf ? `\nHash SHA-256 da NF: ${a.hash_nf}` : "");
       const acoes = el.querySelector(".acoes");
       if (a.tem_foto){
         const img = document.createElement("img"); img.className = "al-img"; img.alt = "Foto da tentativa"; img.loading = "lazy"; img.src = `/api/alertas/${a.id}/foto`;
-        const abrir = () => { $("#viewImg").src = img.src; $("#viewName").textContent = `Alerta · ${a.posto_nome || ""} · nota ${a.nota || "?"} · ${a.foto_em || ""}`; $("#viewHash").textContent = a.hash_foto ? `Hash SHA-256 da foto: ${a.hash_foto}` : ""; $("#viewImg").oncontextmenu = null; $("#viewer").hidden = false; };
+        const abrir = () => abrirViewer(img.src, `Alerta · ${a.posto_nome || ""} · nota ${a.nota || "?"} · ${a.foto_em || ""}`, a.hash_foto, false);
         img.onclick = abrir;
         el.querySelector(".al-corpo").prepend(img);
         const bv = document.createElement("button"); bv.textContent = "Ver foto"; bv.onclick = abrir; acoes.appendChild(bv);
-        const bf = document.createElement("a"); bf.className = "btn"; bf.href = `/api/alertas/${a.id}/foto?download=1`; bf.textContent = "Baixar foto"; acoes.appendChild(bf);
+        if (r.podeBaixar){ const bf = document.createElement("a"); bf.className = "btn"; bf.href = `/api/alertas/${a.id}/foto?download=1`; bf.textContent = "Baixar foto"; acoes.appendChild(bf); }
       }
-      if (a.tem_nf){ const bn = document.createElement("a"); bn.className = "btn"; bn.href = `/api/alertas/${a.id}/nf`; bn.textContent = "Baixar NF"; acoes.appendChild(bn); }
+      if (a.tem_nf && r.podeBaixar){ const bn = document.createElement("a"); bn.className = "btn"; bn.href = `/api/alertas/${a.id}/nf`; bn.textContent = "Baixar NF"; acoes.appendChild(bn); }
       if (a.visto){ const s = document.createElement("span"); s.className = "hint"; s.textContent = "Visto em " + brtTexto(brt(new Date(a.visto_em))); acoes.appendChild(s); }
       else if (r.podeMarcar){ const b = document.createElement("button"); b.textContent = "Marcar como visto"; b.onclick = async () => { b.disabled = true; try { await api(`/api/alertas/${a.id}`, { method:"PUT", body:{ visto:true } }); listarAlertas(); } catch (e) { b.disabled = false; alertaErro(acoes, e.message); } }; acoes.appendChild(b); }
       lista.appendChild(el);
@@ -645,26 +665,30 @@ async function listarPostos(){
   try {
     const r = await api("/api/postos");
     box.innerHTML = "";
-    if (!r.postos.length){ box.innerHTML = `<div class="empty">Nenhum posto cadastrado.${ehAdmin ? " Use o formulário acima." : ""}</div>`; return; }
-    r.postos.forEach(p => box.appendChild(montaPosto(p)));
+    if (!r.postos.length){ box.innerHTML = `<div class="empty">Nenhum posto cadastrado.${r.podeAlterar ? " Use o formulário acima." : ""}</div>`; return; }
+    r.postos.forEach(p => box.appendChild(montaPosto(p, r.podeAlterar)));
   } catch (e) { box.innerHTML = ""; alertaErro(box, e.message); }
 }
-function montaPosto(p){
+function montaPosto(p, podeAlterar){
   const el = document.createElement("div"); el.className = "posto";
   el.innerHTML = `
-    <div class="row" style="justify-content:space-between"><div><b class="pn"></b><div class="mono hint pc"></div></div><button data-a="editar" class="so-admin">Editar posto</button></div>
+    <div class="row" style="justify-content:space-between"><div><b class="pn"></b><div class="mono hint pc"></div><div class="bloq" hidden></div></div><div class="row"><button data-a="desbloquear" hidden>Desbloquear</button><button data-a="editar">Editar posto</button></div></div>
     <div class="stack ed" hidden>
       <div class="fields"><div><label>CNPJ do posto</label><input class="mono e-cnpj"></div><div><label>Nome do posto</label><input class="e-nome" maxlength="60"></div></div>
       <div class="row"><button class="primary" data-a="salvar">Salvar alterações</button><button data-a="cancelar">Cancelar</button></div>
       <span class="hint">As fotos e alertas continuam vinculados a este posto. O posto passa a entrar com o CNPJ novo.</span>
     </div>
-    <div class="row so-admin"><input type="text" placeholder="Nova senha" aria-label="Nova senha" autocomplete="off" class="e-senha"><button data-a="senha">Alterar senha</button></div>
+    <div class="row l-senha"><input type="text" placeholder="Nova senha" aria-label="Nova senha" autocomplete="off" class="e-senha"><button data-a="senha">Alterar senha</button></div>
     <div class="msg" hidden></div>`;
   el.querySelector(".pn").textContent = p.nome;
   el.querySelector(".pc").textContent = `CNPJ ${maskCNPJ(p.cnpj)} · ${p.fotos} ${p.fotos===1?"foto":"fotos"}` + (p.alertas ? ` · ${p.alertas} alerta(s) em aberto` : "")
     + (p.ultimo_login_txt ? ` · último login ${p.ultimo_login_txt} (IP ${p.ultimo_ip})` : " · ainda não fez login");
+  if (p.bloqueado_ate_txt){ const b = el.querySelector(".bloq"); b.hidden = false; b.textContent = `Bloqueado por senhas erradas até ${p.bloqueado_ate_txt}`; }
+  if (!podeAlterar){ el.querySelector('[data-a="editar"]').remove(); el.querySelector('[data-a="desbloquear"]').remove(); el.querySelector(".l-senha").remove(); return el; }
   const msg = el.querySelector(".msg"), ed = el.querySelector(".ed");
   const iC = el.querySelector(".e-cnpj"), iN = el.querySelector(".e-nome");
+  const bD = el.querySelector('[data-a="desbloquear"]'); bD.hidden = !p.bloqueado_ate_txt;
+  bD.onclick = async () => { try { await api(`/api/postos/${p.id}/desbloquear`, { method:"PUT", body:{} }); listarPostos(); } catch (e) { showMsg(msg, e.message); } };
   iC.addEventListener("input", () => { iC.value = maskCNPJ(iC.value); });
   el.querySelector('[data-a="editar"]').onclick = () => { iC.value = maskCNPJ(p.cnpj); iN.value = p.nome; ed.hidden = false; showMsg(msg, ""); };
   el.querySelector('[data-a="cancelar"]').onclick = () => { ed.hidden = true; };
@@ -682,36 +706,64 @@ function montaPosto(p){
   return el;
 }
 
-/* ----- usuários de consulta (só o admin) ----- */
+/* ----- usuários da matriz e seus poderes ----- */
+const NOMES_PODERES = { baixar: "Baixar fotos, notas e relatórios", alertas: "Ver alertas e farol de IP", postos: "Alterar postos", usuarios: "Alterar usuários da matriz" };
+function caixasPoderes(alvo, marcados, desabilitar){
+  alvo.innerHTML = "";
+  Object.keys(NOMES_PODERES).forEach(k => {
+    const l = document.createElement("label"); l.className = "check poder";
+    const c = document.createElement("input"); c.type = "checkbox"; c.value = k; c.checked = !!marcados[k];
+    c.disabled = !!desabilitar || !tenho(k);
+    if (!tenho(k)) l.title = "Você não tem este poder, então não pode concedê-lo.";
+    l.appendChild(c); l.appendChild(document.createTextNode(" " + NOMES_PODERES[k])); alvo.appendChild(l);
+  });
+}
+const lerCaixas = alvo => Object.fromEntries([...alvo.querySelectorAll("input[type=checkbox]")].map(c => [c.value, c.checked]));
+const resumoPoderes = p => { const l = Object.keys(NOMES_PODERES).filter(k => p[k]).map(k => NOMES_PODERES[k]); return l.length ? l.join(" · ") : "Somente visualizar fotos e postos"; };
+
 $("#fNovoUsuario").addEventListener("submit", async e => {
   e.preventDefault();
   const usuario = $("#uUsuario").value.trim().toLowerCase(), nome = $("#uNome").value.trim(), senha = $("#uSenha").value;
   try {
-    await api("/api/usuarios", { method:"POST", body:{ usuario, nome, senha } });
-    $("#uUsuario").value = ""; $("#uNome").value = ""; $("#uSenha").value = "";
+    await api("/api/usuarios", { method:"POST", body:{ usuario, nome, senha, perms: lerCaixas($("#uPoderes")) } });
+    $("#uUsuario").value = ""; $("#uNome").value = ""; $("#uSenha").value = ""; caixasPoderes($("#uPoderes"), {});
     showMsg($("#uMsg"), `Usuário “${usuario}” criado. Ele entra pela mesma tela de login, com esse usuário e a senha.`, "ok");
     listarUsuarios();
   } catch (err) { showMsg($("#uMsg"), err.message); }
 });
 async function listarUsuarios(){
   const box = $("#usLista");
+  if (!$("#uPoderes").children.length) caixasPoderes($("#uPoderes"), {});
   try {
     const r = await api("/api/usuarios");
     box.innerHTML = "";
-    if (!r.usuarios.length){ box.innerHTML = `<div class="empty">Nenhum usuário de consulta. Use o formulário acima.</div>`; return; }
+    if (!r.usuarios.length){ box.innerHTML = `<div class="empty">Nenhum usuário da matriz. Use o formulário acima.</div>`; return; }
     r.usuarios.forEach(u => {
       const el = document.createElement("div"); el.className = "posto" + (u.ativo ? "" : " inativo");
       el.innerHTML = `
-        <div class="row" style="justify-content:space-between"><div><b class="pn"></b><div class="mono hint pc"></div></div><button data-a="ativo"></button></div>
-        <div class="row"><input type="text" class="e-nome" maxlength="60" aria-label="Nome"><button data-a="nome">Salvar nome</button></div>
+        <div class="row" style="justify-content:space-between"><div><b class="pn"></b><div class="mono hint pc"></div><div class="hint pd"></div><div class="bloq" hidden></div></div><div class="row"><button data-a="desbloquear" hidden>Desbloquear</button><button data-a="ativo"></button></div></div>
+        <div class="poderes"></div>
+        <div class="row"><input type="text" class="e-nome" maxlength="60" aria-label="Nome"><button data-a="salvar">Salvar nome e poderes</button></div>
         <div class="row"><input type="text" placeholder="Nova senha" aria-label="Nova senha" autocomplete="off" class="e-senha"><button data-a="senha">Alterar senha</button></div>
         <div class="msg" hidden></div>`;
-      el.querySelector(".pn").textContent = u.nome + (u.ativo ? "" : " (desativado)");
-      el.querySelector(".pc").textContent = `Usuário: ${u.usuario} · consulta · criado em ${brtTexto(brt(new Date(u.criado_em)))}`;
+      el.querySelector(".pn").textContent = u.nome + (u.ativo ? "" : " (desativado)") + (u.eu ? " (você)" : "");
+      el.querySelector(".pc").textContent = `Usuário: ${u.usuario} · criado em ${brtTexto(brt(new Date(u.criado_em)))}`;
+      el.querySelector(".pd").textContent = "Poderes: " + resumoPoderes(u.perms);
+      if (u.bloqueado_ate_txt){ const b = el.querySelector(".bloq"); b.hidden = false; b.textContent = `Bloqueado por senhas erradas até ${u.bloqueado_ate_txt}`; }
       const msg = el.querySelector(".msg"), iN = el.querySelector(".e-nome"); iN.value = u.nome;
+      // quem tem poderes que eu não tenho (ou eu mesmo) só pode ser alterado pelo admin
+      const travado = !ehAdmin && (u.eu || Object.keys(u.perms).some(k => u.perms[k] && !tenho(k)));
+      caixasPoderes(el.querySelector(".poderes"), u.perms, travado);
+      if (travado){
+        el.querySelectorAll("button, input").forEach(x => x.disabled = true);
+        showMsg(msg, u.eu ? "Para alterar o seu próprio usuário, fale com o administrador." : "Este usuário tem poderes que você não tem; só o administrador pode alterá-lo.", "ok");
+        box.appendChild(el); return;
+      }
+      const bD = el.querySelector('[data-a="desbloquear"]'); bD.hidden = !u.bloqueado_ate_txt;
+      bD.onclick = async () => { try { await api(`/api/usuarios/${u.id}/desbloquear`, { method:"PUT", body:{} }); listarUsuarios(); } catch (e) { showMsg(msg, e.message); } };
       const bA = el.querySelector('[data-a="ativo"]'); bA.textContent = u.ativo ? "Desativar" : "Reativar";
       bA.onclick = async () => { try { await api(`/api/usuarios/${u.id}`, { method:"PUT", body:{ nome: u.nome, ativo: !u.ativo } }); listarUsuarios(); } catch (e) { showMsg(msg, e.message); } };
-      el.querySelector('[data-a="nome"]').onclick = async () => { try { await api(`/api/usuarios/${u.id}`, { method:"PUT", body:{ nome: iN.value, ativo: !!u.ativo } }); listarUsuarios(); } catch (e) { showMsg(msg, e.message); } };
+      el.querySelector('[data-a="salvar"]').onclick = async () => { try { await api(`/api/usuarios/${u.id}`, { method:"PUT", body:{ nome: iN.value, ativo: !!u.ativo, perms: lerCaixas(el.querySelector(".poderes")) } }); listarUsuarios(); } catch (e) { showMsg(msg, e.message); } };
       el.querySelector('[data-a="senha"]').onclick = async () => {
         const s = el.querySelector(".e-senha");
         if (s.value.length < 6) return showMsg(msg, "A senha precisa ter pelo menos 6 caracteres.");
@@ -722,6 +774,33 @@ async function listarUsuarios(){
     });
   } catch (e) { box.innerHTML = ""; alertaErro(box, e.message); }
 }
+
+/* ----- registro de ações (só o admin) ----- */
+async function listarRegistros(){
+  if (!ehAdmin) return;
+  const lista = $("#rgLista");
+  const q = new URLSearchParams();
+  [["quem","#rgQuem"],["tipo","#rgTipo"],["de","#rgDe"],["ate","#rgAte"]].forEach(([k,s]) => { const v = $(s).value; if (v) q.set(k, v); });
+  try {
+    const r = await api("/api/registros?" + q);
+    const opc = [["admin","Administrador"],["matriz","Todos os usuários da matriz"],...r.usuarios.map(u => ["u:" + u.id, `Matriz · ${u.nome} (${u.usuario})`]),["postos","Todos os postos"],...r.postos.map(p => ["p:" + p.id, `Posto · ${p.nome}`]),["sistema","Sistema (bloqueios)"]];
+    preencheSelect($("#rgQuem"), opc);
+    $("#rgCount").textContent = r.total === r.registros.length ? `${r.total} registro(s)` : `${r.registros.length} de ${r.total} registros (os mais recentes)`;
+    lista.innerHTML = "";
+    if (!r.registros.length){ lista.innerHTML = `<div class="empty">Nenhuma ação registrada com esses filtros.</div>`; return; }
+    const tab = document.createElement("div"); tab.className = "rg-tabela";
+    tab.innerHTML = `<table><thead><tr><th>Quando (Brasília)</th><th>Quem</th><th>Ação</th><th>Detalhe</th><th>IP</th></tr></thead><tbody></tbody></table>`;
+    const tb = tab.querySelector("tbody");
+    r.registros.forEach(x => {
+      const tr = document.createElement("tr"); tr.className = "rg-" + x.ator_tipo;
+      [x.quando, x.ator_nome || x.ator_tipo, x.acao_txt, x.descricao || "", x.ip || ""].forEach((v, i) => { const td = document.createElement("td"); td.textContent = v; if (i === 0 || i === 4) td.className = "mono"; tr.appendChild(td); });
+      tb.appendChild(tr);
+    });
+    lista.appendChild(tab);
+  } catch (e) { lista.innerHTML = ""; alertaErro(lista, e.message); }
+}
+["#rgQuem","#rgTipo","#rgDe","#rgAte"].forEach(s => $(s).addEventListener("change", listarRegistros));
+$("#rgAtualizar").onclick = listarRegistros;
 
 /* ---------- início ---------- */
 iniciar();

@@ -76,6 +76,27 @@ Roda num único servidor Node.js, sem dependências externas. O banco é SQLite 
   - Não alteram postos, usuários nem alertas.
   - São desativados, nunca excluídos.
 - **Relatório Excel** na aba Fotos. Respeita os filtros e traz IP, hashes, conferência e chave de acesso.
+- **Bloqueio por senha errada.**
+  - Depois de 5 senhas erradas seguidas, a conta (posto ou usuário da matriz) fica bloqueada por 30 minutos. Um acerto antes disso zera a contagem.
+  - O bloqueio gera um alerta e entra no registro de ações.
+  - Quem tem o poder de alterar postos ou usuários pode desbloquear antes do prazo.
+  - O usuário `admin` é bloqueado só no IP de onde vieram as tentativas, para que um ataque não tranque o administrador para fora.
+- **Poderes dos usuários da matriz.** Todo usuário vê as fotos e a lista de postos. O admin escolhe, para cada um:
+  - baixar fotos, notas e relatórios;
+  - ver alertas e farol de IP;
+  - alterar postos;
+  - alterar usuários da matriz.
+
+  Ninguém concede um poder que não tem, nem altera o próprio usuário. Usuários criados antes desta versão mantêm o que já faziam (baixar e ver alertas).
+- **Registro de ações** (aba só do admin):
+  - entradas na matriz e downloads de foto, NF e alerta (o .zip conta como um registro, com a quantidade de arquivos);
+  - relatórios Excel, com os filtros usados;
+  - cadastros e alterações de postos e usuários (com o antes e o depois) e desbloqueios;
+  - alertas marcados como vistos;
+  - bloqueios;
+  - cada vez que um posto abre uma foto.
+- **Posto só visualiza.** No banco do posto, a foto só carrega quando ele clica em "Ver foto". Ela abre na tela, sem download e sem ficar guardada no navegador, e cada abertura é registrada.
+- **Erros sem detalhes técnicos.** O usuário vê uma mensagem simples com um código. O detalhe fica só no log do servidor, com o mesmo código. `/api/status` só abre para o admin logado.
 - **Nada é apagado:** a atualização do banco só acrescenta colunas e tabelas.
 
 ## Rodar no computador (teste)

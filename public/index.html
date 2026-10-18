@@ -118,9 +118,10 @@
       <div class="store"><b>Portal da matriz</b><span class="hint" id="aQuem">Acesso administrador</span></div>
       <nav class="abas" role="tablist">
         <button role="tab" data-aba="fotos" aria-selected="true">Fotos</button>
-        <button role="tab" data-aba="alertas" aria-selected="false">Alertas <span class="badge-n alerta-n" id="nAlertas" hidden>0</span></button>
+        <button role="tab" data-aba="alertas" aria-selected="false" class="req-alertas">Alertas <span class="badge-n alerta-n" id="nAlertas" hidden>0</span></button>
         <button role="tab" data-aba="postos" aria-selected="false">Postos</button>
-        <button role="tab" data-aba="usuarios" aria-selected="false" class="so-admin">Usuários</button>
+        <button role="tab" data-aba="usuarios" aria-selected="false" class="req-usuarios">Usuários</button>
+        <button role="tab" data-aba="registros" aria-selected="false" class="req-admin">Registro de ações</button>
       </nav>
       <button class="sair">Sair</button>
     </div>
@@ -139,7 +140,7 @@
         <div><label for="aAte">Data até</label><input id="aAte" type="date"></div>
         <div class="fim"><button id="aLimpar">Limpar filtros</button></div>
       </div>
-      <div class="row"><button id="aExcel" class="primary">Relatório Excel</button><button id="aZip">Baixar fotos e notas (.zip)</button><span class="hint" id="aZipInfo"></span></div>
+      <div class="row req-baixar"><button id="aExcel" class="primary">Relatório Excel</button><button id="aZip">Baixar fotos e notas (.zip)</button><span class="hint" id="aZipInfo"></span></div>
       <div id="aMsg" class="msg" hidden></div>
       <div class="list grade" id="aLista"></div>
     </section>
@@ -162,7 +163,7 @@
 
     <section class="panel stack" data-painel="postos" hidden>
       <h2>Postos cadastrados</h2>
-      <form id="fNovoPosto" class="stack nf so-admin" autocomplete="off">
+      <form id="fNovoPosto" class="stack nf req-postos" autocomplete="off">
         <b>Cadastrar posto</b>
         <div class="fields3">
           <div><label for="nCnpj">CNPJ do posto</label><input id="nCnpj" class="mono" placeholder="00.000.000/0000-00" required></div>
@@ -175,9 +176,22 @@
       <div class="list" id="psLista"></div>
     </section>
 
+    <section class="panel stack" data-painel="registros" hidden>
+      <div class="row" style="justify-content:space-between"><h2>Registro de ações</h2><span class="count" id="rgCount"></span></div>
+      <p class="hint" style="margin:0">Visível só para o administrador. Mostra o que cada usuário da matriz baixou, alterou e quando, os bloqueios por senha errada e cada vez que um posto abriu uma foto. Nada é apagado.</p>
+      <div class="filtros">
+        <div><label for="rgQuem">Quem</label><select id="rgQuem"><option value="">Todos</option></select></div>
+        <div><label for="rgTipo">Tipo de ação</label><select id="rgTipo"><option value="">Todas</option><option value="downloads">Downloads e relatórios</option><option value="alteracoes">Alterações (postos, usuários, alertas)</option><option value="acessos">Entradas na matriz</option><option value="aberturas">Fotos abertas pelos postos</option><option value="bloqueios">Bloqueios por senha errada</option></select></div>
+        <div class="fim"><button id="rgAtualizar">Atualizar</button></div>
+        <div><label for="rgDe">Data de</label><input id="rgDe" type="date"></div>
+        <div><label for="rgAte">Data até</label><input id="rgAte" type="date"></div>
+      </div>
+      <div id="rgLista"></div>
+    </section>
+
     <section class="panel stack" data-painel="usuarios" hidden>
-      <h2>Usuários de consulta da matriz</h2>
-      <p class="hint" style="margin:0">Usuários de consulta veem fotos, alertas e postos, e baixam fotos, notas e relatórios. Não cadastram nem alteram postos, usuários ou alertas. Usuários não são excluídos: são desativados, para manter o histórico.</p>
+      <h2>Usuários da matriz</h2>
+      <p class="hint" style="margin:0">Todo usuário da matriz vê as fotos e a lista de postos. Marque os poderes extras de cada um; sem nenhum marcado, ele só visualiza. Você só pode conceder poderes que tem. Usuários não são excluídos: são desativados, para manter o histórico.</p>
       <form id="fNovoUsuario" class="stack nf" autocomplete="off">
         <b>Criar usuário</b>
         <div class="fields3">
@@ -185,6 +199,7 @@
           <div><label for="uNome">Nome da pessoa</label><input id="uNome" maxlength="60" required></div>
           <div><label for="uSenha">Senha</label><input id="uSenha" type="text" minlength="6" required autocomplete="off"></div>
         </div>
+        <div><span class="lbl">Poderes</span><div class="poderes" id="uPoderes"></div></div>
         <div><button class="primary" type="submit">Criar usuário</button></div>
         <div id="uMsg" class="msg" hidden></div>
       </form>
