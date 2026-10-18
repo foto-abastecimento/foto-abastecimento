@@ -105,7 +105,27 @@ function entrarPosto(p){
   ligarCamera();
   atualizarContagem();
   atualizarIP();
+  // confirmação do envio anterior, guardada antes do recarregamento automático
+  let ultimo = null; try { ultimo = sessionStorage.getItem("ultimoEnvio"); sessionStorage.removeItem("ultimoEnvio"); } catch {}
+  if (ultimo) showMsg($("#capMsg"), "Último envio concluído. " + ultimo + " Pronto para o próximo abastecimento.", "ok");
 }
+
+/* Depois de um envio concluído, a página recarrega sozinha e fica pronta para o próximo abastecimento */
+const SEGUNDOS_RECARGA = 4;
+let recargaT = null;
+function recarregar(){ clearInterval(recargaT); location.reload(); }
+function envioConcluido(msg){
+  try { sessionStorage.setItem("ultimoEnvio", msg); } catch {}
+  pararCamera();
+  $("#okMsg").textContent = msg;
+  $("#okEnvio").hidden = false;
+  let n = SEGUNDOS_RECARGA;
+  const conta = () => { $("#okConta").textContent = `Preparando o próximo registro em ${n} s…`; };
+  conta();
+  recargaT = setInterval(() => { n--; if (n <= 0) recarregar(); else conta(); }, 1000);
+  $("#okAgora").focus();
+}
+$("#okAgora").onclick = recarregar;
 
 /* ----- câmera do computador (navegador) ----- */
 let stream = null;
@@ -353,8 +373,7 @@ $("#btnSalvar").onclick = async () => {
   try {
     const r = await api("/api/fotos", { method:"POST", body: fd });
     limparTudo();
-    showMsg($("#capMsg"), `Salvo: ${r.arquivo} + ${r.arquivoNf}. Impressão digital (hash) da foto: ${String(r.hashFoto || "").slice(0, 16)}…`, "ok");
-    atualizarContagem();
+    envioConcluido(`Salvo: ${r.arquivo} + ${r.arquivoNf}. Impressão digital (hash) da foto: ${String(r.hashFoto || "").slice(0, 16)}…`);
   } catch (e) {
     if (e.dados && e.dados.alertaMatriz) mostraAlertaHorario({ ok:false, titulo: e.message, det: "O servidor bloqueou o envio." });
     showMsg($("#capMsg"), e.message);
