@@ -73,13 +73,53 @@ function destPorPosicao(itens, cnpjEmit){
   if (!nome && !doc) return null;
   return { nome: nome.slice(0,100), doc };
 }
+/* NFC-e (cupom fiscal eletrônico): bloco "CONSUMIDOR CNPJ/CPF: ..." com o nome na linha de baixo */
+const RE_CONSUMIDOR = /^\s*CONSUMIDOR\b(?!\s+ELETR)/i;
+function docsNoTexto(s, cnpjEmit){
+  for (const m of String(s).matchAll(/\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}/g)){ const d = soDig(m[0]); if (d !== cnpjEmit && validCNPJ(d)) return { d, fim: m.index + m[0].length }; }
+  for (const m of String(s).matchAll(/\d{3}\.?\d{3}\.?\d{3}-?\d{2}/g)){ const d = soDig(m[0]); if (validCPF(d)) return { d, fim: m.index + m[0].length }; }
+  return null;
+}
+function destNFCe(itens, cnpjEmit){
+  const pg = itens.filter(i => i.p === 1);
+  // a linha inteira a partir do item (o navegador pode quebrar "CONSUMIDOR" e "CNPJ: ..." em pedaços separados)
+  const linhaDe = it => pg.filter(i => Math.abs(i.y - it.y) < 2 && i.x >= it.x - 1).sort((a,b) => a.x - b.x).map(i => i.s).join(" ").replace(/\s+/g, " ").trim();
+  // o bloco do consumidor começa a linha ("Via Consumidor" e "Nota Fiscal de Consumidor Eletrônica" não contam)
+  const comecaLinha = it => !pg.some(i => i !== it && Math.abs(i.y - it.y) < 2 && i.x < it.x - 1 && /[A-Za-z0-9À-ÿ]/.test(i.s));
+  const rot = pg.find(i => /^\s*CONSUMIDOR\b/i.test(i.s) && comecaLinha(i) && RE_CONSUMIDOR.test(linhaDe(i)));
+  if (!rot) return null;
+  const linhaRot = linhaDe(rot);
+  const linhas = []; let ref = rot;
+  for (let k = 0; k < 3; k++){ const l = linhaAbaixo(pg, ref); if (!l.length) break; linhas.push(l.map(i => i.s).join(" ").replace(/\s+/g, " ").trim()); ref = l[0]; }
+  if (/N[ÃA]O\s+IDENTIFICAD/i.test(linhaRot) || (linhas[0] && /^\s*CONSUMIDOR\s+N[ÃA]O\s+IDENTIFICAD/i.test(linhas[0]))) return { nome: "Consumidor não identificado", doc: "" };
+  let doc = "", nome = "";
+  const naLinha = docsNoTexto(linhaRot, cnpjEmit);
+  let resto = linhas;
+  if (naLinha){
+    doc = naLinha.d;
+    nome = linhaRot.slice(naLinha.fim).replace(/^[\s\-–:|]+/, "").replace(/^NOME\s*:?\s*/i, "").trim();
+    // nome comprido que quebrou para a linha de baixo (só letras, sem cara de endereço ou rótulo)
+    const cont = linhas[0] || "";
+    if (nome && /^[A-ZÀ-Ý .&'-]{2,60}$/.test(cont) && !/\b(RUA|R\.|AV|AVENIDA|ROD|RODOVIA|ESTRADA|LINHA|TRAV|ALAMEDA|PRA[ÇC]A|NFC|S[ÉE]RIE|VIA|PROTOCOLO|CONSULTE|CHAVE)\b/.test(cont)) nome = (nome + " " + cont).trim();
+  } else if (linhas[0]){
+    const l0 = docsNoTexto(linhas[0], cnpjEmit);
+    if (l0){ doc = l0.d; nome = linhas[0].slice(l0.fim).replace(/^[\s\-–:|]+/, "").replace(/^NOME\s*:?\s*/i, "").trim(); resto = linhas.slice(1); }
+  }
+  if ((nome.match(/[A-Za-zÀ-ÿ]/g) || []).length < 3){
+    const l = resto.find(x => (x.match(/[A-Za-zÀ-ÿ]/g) || []).length >= 3 && !/^(CPF|CNPJ|ID\b|NFC-?e|S[ÉE]RIE|PROTOCOLO|VIA\b)/i.test(x));
+    nome = l ? l.replace(/^NOME\s*:?\s*/i, "").trim() : "";
+  }
+  if (!nome && !doc) return null;
+  return { nome: nome.slice(0, 100), doc };
+}
+
 /* reserva: leitura pelo texto corrido (NFC-e e leiautes diferentes) */
 function destPorTexto(texto, cnpjEmit){
   const t = texto.replace(/\s+/g," ");
   let i = t.search(/DESTINAT[ÁA]RIO/i), trecho;
   if (i >= 0) trecho = t.slice(i, i+700);
   else {
-    const j = t.search(/CONSUMIDOR/i); if (j < 0) return null;
+    const j = t.search(/CONSUMIDOR(?!\s+ELETR)(?=\s*(?:-\s*)?(?:CNPJ|CPF|N[ÃA]O\s+IDENT|ID\b|NOME|:))/i); if (j < 0) return null;
     trecho = t.slice(j, j+300);
     if (/CONSUMIDOR\s*N[ÃA]O\s+IDENTIFICADO/i.test(trecho)) return { nome:"Consumidor não identificado", doc:"" };
   }
@@ -134,10 +174,32 @@ function acharHoraSaida(texto, itens){
   const r = montaData(d[1], d[2], d[3], h[1], h[2], h[3]);
   return r ? { ...r, fonte: "hora da saída" } : null;
 }
+/* NFC-e: data e hora logo abaixo da série (emissão) ou abaixo de "Data de autorização" */
+function dataAbaixo(itens, re){
+  const pg = itens.filter(i => i.p === 1);
+  for (const rot of pg.filter(i => re.test(i.s))){
+    const mesma = rot.s.match(new RegExp(RE_DT));
+    if (mesma && new RegExp(re.source + "[^\\d]{0,30}" + RE_DT, "i").test(rot.s)) return mesma;
+    let ref = rot;
+    for (let k = 0; k < 2; k++){ const l = linhaAbaixo(pg, ref); if (!l.length) break; const m = l.map(i => i.s).join(" ").match(new RegExp(RE_DT)); if (m) return m; ref = l[0]; }
+  }
+  return null;
+}
+function ehNFCe(texto){ return /NFC-?e|CONSUMIDOR\s+ELETR/i.test(texto); }
+function acharEmissaoNFCe(texto, itens){
+  const t = texto.replace(/\s+/g," ");
+  let m = t.match(new RegExp("S[ÉE]RIE\\s*:?\\s*\\d{1,3}\\b[\\s\\-–|]*(?:EMISS[ÃA]O\\s*:?\\s*)?" + RE_DT, "i")) || dataAbaixo(itens, /S[ÉE]RIE/i);
+  if (m){ const r = montaData(...m.slice(1)); if (r) return { ...r, fonte: "data/hora abaixo da série (NFC-e)" }; }
+  m = t.match(new RegExp("DATA\\s+D[AE]\\s+AUTORIZA[ÇC][ÃA]O\\s*:?\\s*" + RE_DT, "i")) || dataAbaixo(itens, /DATA\s+D[AE]\s+AUTORIZA/i);
+  if (m){ const r = montaData(...m.slice(1)); if (r) return { ...r, fonte: "data de autorização (NFC-e)" }; }
+  return null;
+}
 function acharEmissao(texto, itens){
   // 1º: HORA DA SAÍDA do DANFE (regra definida pela matriz)
   const saida = acharHoraSaida(texto, itens);
   if (saida) return saida;
+  // cupom fiscal eletrônico (NFC-e): data/hora abaixo da série ou da data de autorização
+  if (ehNFCe(texto)){ const c = acharEmissaoNFCe(texto, itens); if (c) return c; }
   // reservas: notas sem esse campo preenchido (ex.: NFC-e)
   const t = texto.replace(/\s+/g," ");
   let m = t.match(new RegExp("EMISS[ÃA]O[^\\d]{0,40}?" + RE_DT, "i"));
@@ -159,10 +221,11 @@ function analisar(texto, itens){
   if (chave) info = { numero: numInt(chave.slice(25,34)), serie: numInt(chave.slice(22,25)), modelo: chave.slice(20,22)==="65"?"NFC-e":"NF-e", cnpjEmit: chave.slice(6,20), chave, origem: "chave de acesso" };
   else { const n = acharNumeroImpresso(texto); if (n) info = { numero: numInt(n), origem: "número impresso no documento" }; }
   if (!info) return { lido: false, temTexto: !!String(texto || "").trim() };
-  const pos = destPorPosicao(itens, info.cnpjEmit || ""), txt = destPorTexto(texto, info.cnpjEmit || "");
+  const ehCupom = info.modelo === "NFC-e" || (!info.modelo && ehNFCe(texto));
+  const pos = (ehCupom && destNFCe(itens, info.cnpjEmit || "")) || destPorPosicao(itens, info.cnpjEmit || ""), txt = destPorTexto(texto, info.cnpjEmit || "");
   const dest = pos ? { nome: pos.nome || (txt && txt.nome) || "", doc: pos.doc || (txt && txt.doc) || "" } : (txt || { nome: "", doc: "" });
   return { lido: true, ...info, emissao: acharEmissao(texto, itens), dest };
 }
 
-raiz.LeituraNF = { analisar, acharChave, acharNumeroImpresso, acharEmissao, destPorPosicao, destPorTexto, validCNPJ, validCPF, numInt, soDig };
+raiz.LeituraNF = { analisar, acharChave, acharNumeroImpresso, acharEmissao, destPorPosicao, destPorTexto, destNFCe, validCNPJ, validCPF, numInt, soDig };
 })(typeof globalThis !== "undefined" ? globalThis : this);

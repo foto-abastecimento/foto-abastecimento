@@ -43,6 +43,7 @@ Roda num único servidor Node.js, sem dependências externas. O banco é SQLite 
   - PDF da nota com o mesmo número;
   - cliente da nota;
   - emissão até 10 minutos antes ou depois da foto.
+- **Notas aceitas:** DANFE de NF-e, em que vale a HORA DA SAÍDA, e cupom fiscal eletrônico (NFC-e). No cupom, vale a data e hora logo abaixo da série; se não houver, a que fica abaixo de "Data de autorização". O cliente do cupom vem do bloco "CONSUMIDOR" (CNPJ/CPF e o nome logo abaixo, ou "Consumidor não identificado").
 - **Fora do horário:** o envio é bloqueado com a mensagem "entre em contato com a matriz", e um alerta aparece no portal da matriz. Número de nota digitado errado não gera alerta.
 - **Downloads:** o posto não abre nem baixa fotos e notas já enviadas. A matriz baixa fotos, notas e .zip.
 - **Nota única:** depois de um envio aceito, o posto não consegue enviar a mesma nota de novo. Vale o mesmo número, com ou sem zeros à esquerda, ou a mesma chave de acesso. O aviso aparece já ao digitar o número. A tentativa fica no Registro de ações, e envios repetidos antigos continuam no histórico.
