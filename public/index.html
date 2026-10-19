@@ -157,8 +157,8 @@
 
     <section class="stack" data-painel="alertas" hidden>
       <div class="panel stack">
-        <div class="row" style="justify-content:space-between"><h2>Semáforo de IP por posto</h2><span class="hint">Últimos 5 logins de cada posto</span></div>
-        <p class="hint" style="margin:0">Controle feito pelo login do posto. Verde: mesmo IP em pelo menos 3 logins seguidos. Vermelho: o IP mudou entre os últimos logins (não bloqueia o posto). Cinza: poucos logins para avaliar (o primeiro acesso não conta).</p>
+        <div class="row" style="justify-content:space-between"><h2>Semáforo de IP e localização por posto</h2><span class="hint">Últimos 5 registros de cada posto</span></div>
+        <p class="hint" style="margin:0">Controle feito pelo login do posto. Verde: mesmo IP em pelo menos 3 logins seguidos. Vermelho: o IP mudou entre os últimos logins (não bloqueia o posto). Cinza: poucos logins para avaliar (o primeiro acesso não conta). Na segunda luz, a localização (só postos com o controle ligado): verde, últimos logins e envios dentro de 500 m do local cadastrado; vermelho, algum a mais de 500 m.</p>
         <div class="list" id="semLista"></div>
       </div>
       <div class="panel stack">
@@ -166,7 +166,7 @@
           <h2>Alertas de erros</h2>
           <label class="check"><input type="checkbox" id="alTodos"> Mostrar também os já vistos</label>
         </div>
-        <p class="hint" style="margin:0">Tentativas bloqueadas por horário (hora da saída da nota a mais de 10 minutos da foto, ou nota sem horário legível), com a foto e o PDF enviados, e logins do posto feitos de um IP diferente do login anterior. Número de nota digitado errado não gera alerta.</p>
+        <p class="hint" style="margin:0">Tentativas bloqueadas por horário (hora da saída da nota a mais de 10 minutos da foto, ou nota sem horário legível), com a foto e o PDF enviados, logins do posto feitos de um IP diferente do login anterior, e logins ou envios a mais de 500 m do local cadastrado do posto. Número de nota digitado errado não gera alerta.</p>
         <div class="list" id="alLista"></div>
       </div>
     </section>
@@ -180,6 +180,12 @@
           <div><label for="nNome">Nome do posto</label><input id="nNome" maxlength="60" required></div>
           <div><label for="nSenha">Senha de acesso</label><input id="nSenha" type="text" minlength="4" required autocomplete="off"></div>
         </div>
+        <div class="fields3">
+          <div><label for="nLat">Latitude do posto</label><input id="nLat" class="mono" inputmode="decimal" placeholder="-23.550520"></div>
+          <div><label for="nLng">Longitude do posto</label><input id="nLng" class="mono" inputmode="decimal" placeholder="-46.633308"></div>
+          <div style="align-self:end"><label class="check"><input type="checkbox" id="nUsaLocal"> Usa controle de localização</label></div>
+        </div>
+        <span class="hint">No Google Maps, clique com o botão direito sobre o posto e clique nos números para copiar; cole no campo latitude. Com o controle ligado, o posto só entra e só registra fotos autorizando a localização, e a matriz recebe alerta quando o acesso ou a foto vem a mais de 500 m daqui.</span>
         <div><button class="primary" type="submit">Cadastrar posto</button></div>
         <div id="nMsg" class="msg" hidden></div>
       </form>

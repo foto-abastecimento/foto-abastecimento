@@ -62,6 +62,13 @@ Roda num único servidor Node.js, sem dependências externas. O banco é SQLite 
   - o posto não vê o próprio IP na tela de acesso;
   - atrás do proxy do Railway, vale o último IP público do `X-Forwarded-For`;
   - o IP é o da internet do posto, não o de cada computador.
+- **Localização do posto (opcional, por posto).**
+  - No cadastro do posto: latitude, longitude e a caixa "Usa controle de localização". Postos que já existiam ficam com o controle desligado.
+  - Com o controle ligado, o posto só entra no sistema autorizando a localização no navegador, e cada foto exige a localização na hora.
+  - A latitude e a longitude saem no carimbo da foto, com a precisão informada pelo navegador.
+  - Login ou envio a mais de 500 m do local cadastrado gera alerta, sem bloquear. A segunda luz do farol, ao lado da luz do IP, mostra isso.
+  - A matriz vê cada registro no mapa (Google Maps). O relatório Excel traz latitude, longitude, precisão, distância e link do mapa.
+  - Em computador sem GPS, a posição vem do Wi-Fi ou do IP e pode errar por centenas de metros ou mais. A localização pode ser falsificada por quem souber, então ela é um indicador, não prova.
 - **Controle de IP pelo login do posto.**
   - Cada login do posto fica registrado com IP, data e navegador. Senha errada não conta.
   - A aba Alertas mostra um semáforo com os últimos 5 logins de cada posto:

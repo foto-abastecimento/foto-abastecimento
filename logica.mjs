@@ -13,6 +13,7 @@ const LIMITE_ENVIO_MIN = 20;     // diferença máxima entre a foto e a chegada 
 const MAX_FOTO = 8 * 1024 * 1024;
 const MAX_PDF = 10 * 1024 * 1024;
 const MAX_MINI = 80 * 1024;
+const RAIO_LOCAL_M = 500;         // distância do local cadastrado do posto que gera alerta
 const SESSAO_HORAS = 12;
 const JANELA_IP = 5;             // semáforo de IP: últimos 5 logins do posto
 const MIN_IP_VERDE = 3;          // pelo menos 3 logins no mesmo IP para ficar verde
@@ -33,6 +34,23 @@ const aleatorio = n => hex(crypto.getRandomValues(new Uint8Array(n)));
 const agoraISO = () => new Date().toISOString();
 const sha256 = async bytes => hex(await crypto.subtle.digest("SHA-256", bytes));
 const corta = (v, n) => v == null || v === "" ? null : String(v).slice(0, n);
+/* localização: valida {lat, lng, precisao} vinda do navegador */
+function lerLocal(o) {
+  if (!o || typeof o !== "object") return null;
+  const lat = +o.lat, lng = +o.lng, prec = o.precisao == null || o.precisao === "" ? null : +o.precisao;
+  if (o.lat == null || o.lng == null || o.lat === "" || o.lng === "") return null;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180 || (lat === 0 && lng === 0)) return null;
+  return { lat: Math.round(lat * 1e6) / 1e6, lng: Math.round(lng * 1e6) / 1e6, precisao: Number.isFinite(prec) && prec >= 0 ? Math.round(prec) : null };
+}
+/* distância em metros entre dois pontos (fórmula de haversine) */
+function distanciaM(a, b) {
+  const R = 6371000, rad = x => x * Math.PI / 180;
+  const dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return Math.round(2 * R * Math.asin(Math.sqrt(h)));
+}
+const temLocalCadastrado = p => p && p.lat != null && p.lng != null;
+const fmtDist = m => m >= 1000 ? `${(m / 1000).toFixed(1).replace(".", ",")} km` : `${m} m`;
 
 function json(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), {
@@ -93,8 +111,10 @@ function ipCliente(request) {
 /* ---------- banco: criação e migração (só acrescenta) ---------- */
 let preparo = null;
 const COLUNAS_NOVAS = {
-  fotos: { ip: "TEXT", ip_carimbo: "TEXT", hash_foto: "TEXT", hash_nf: "TEXT", verif_servidor: "TEXT", nf_chave: "TEXT", divergencia: "TEXT", dest_nome_pdf: "TEXT", dest_doc_pdf: "TEXT", chave_mini: "TEXT" },
-  alertas: { ip: "TEXT", ip_anterior: "TEXT", chave_foto: "TEXT", chave_nf: "TEXT", hash_foto: "TEXT", hash_nf: "TEXT", origem: "TEXT" },
+  fotos: { ip: "TEXT", ip_carimbo: "TEXT", hash_foto: "TEXT", hash_nf: "TEXT", verif_servidor: "TEXT", nf_chave: "TEXT", divergencia: "TEXT", dest_nome_pdf: "TEXT", dest_doc_pdf: "TEXT", chave_mini: "TEXT", lat: "REAL", lng: "REAL", precisao: "REAL", dist_m: "REAL" },
+  alertas: { ip: "TEXT", ip_anterior: "TEXT", chave_foto: "TEXT", chave_nf: "TEXT", hash_foto: "TEXT", hash_nf: "TEXT", origem: "TEXT", lat: "REAL", lng: "REAL", precisao: "REAL", dist_m: "REAL" },
+  postos: { lat: "REAL", lng: "REAL", usa_local: "INTEGER NOT NULL DEFAULT 0" },
+  acessos: { lat: "REAL", lng: "REAL", precisao: "REAL", dist_m: "REAL" },
   // usuários que já existiam (antigo "consulta") mantêm o que já faziam: baixar e ver alertas
   usuarios: { perm_baixar: "INTEGER NOT NULL DEFAULT 1", perm_alertas: "INTEGER NOT NULL DEFAULT 1", perm_postos: "INTEGER NOT NULL DEFAULT 0", perm_usuarios: "INTEGER NOT NULL DEFAULT 0" }
 };
@@ -205,10 +225,10 @@ async function lerSessao(request, env) {
     return { matriz: true, papel: "matriz", uid: u.id, nome: u.nome, usuario: u.usuario, perms: poderesDe(u) };
   }
   if (d.r === "posto") {
-    const p = await env.DB.prepare("SELECT id, cnpj, nome, salt FROM postos WHERE id = ?").bind(d.pid).first();
+    const p = await env.DB.prepare("SELECT id, cnpj, nome, salt, lat, lng, usa_local FROM postos WHERE id = ?").bind(d.pid).first();
     // senha alterada pela matriz derruba as sessões antigas
     if (!p || !iguais(p.salt.slice(0, 12), d.s || "")) return null;
-    return { posto: { id: p.id, cnpj: p.cnpj, nome: p.nome }, papel: "posto" };
+    return { posto: { id: p.id, cnpj: p.cnpj, nome: p.nome, usa_local: !!p.usa_local }, papel: "posto", postoLocal: { lat: p.lat, lng: p.lng } };
   }
   return null;
 }
@@ -281,6 +301,8 @@ const TIPOS_ALERTA = {
   horario_nao_lido: "Horário da nota não lido",
   ip_login: "Login de IP diferente do anterior",
   bloqueio: "Acesso bloqueado (senhas erradas)",
+  local_login: "Login longe do local do posto",
+  local_envio: "Envio longe do local do posto",
   ip_alterado: "IP diferente do envio anterior" // tipo antigo, mantido para o histórico
 };
 async function guardarArquivosAlerta(env, postoId, arq) {
@@ -295,7 +317,7 @@ async function registrarAlerta(env, postoId, a, arquivos) {
   if (!TIPOS_ALERTA[a.tipo]) return;
   const nota = String(a.nota || "").slice(0, 20);
   // mesmo posto, tipo e nota em 30 minutos = mesmo alerta (só completa a foto se faltar)
-  if (a.tipo !== "ip_alterado" && a.tipo !== "ip_login" && a.tipo !== "bloqueio") {
+  if (a.tipo !== "ip_alterado" && a.tipo !== "ip_login" && a.tipo !== "bloqueio" && a.tipo !== "local_login") {
     const limite = new Date(Date.now() - 30 * 60e3).toISOString();
     const ja = await env.DB.prepare("SELECT id, chave_foto FROM alertas WHERE posto_id = ? AND tipo = ? AND nota = ? AND criado_em > ?")
       .bind(postoId, a.tipo, nota, limite).first();
@@ -309,17 +331,18 @@ async function registrarAlerta(env, postoId, a, arquivos) {
   }
   const g = await guardarArquivosAlerta(env, postoId, arquivos);
   await env.DB.prepare(`INSERT INTO alertas (posto_id, tipo, nota, cliente, emissao, emissao_fonte, foto_em, dif_min, detalhe, criado_em,
-      ip, ip_anterior, chave_foto, chave_nf, hash_foto, hash_nf, origem)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+      ip, ip_anterior, chave_foto, chave_nf, hash_foto, hash_nf, origem, lat, lng, precisao, dist_m)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
     postoId, a.tipo, nota, corta(a.cliente, 60), corta(a.emissao, 30), corta(a.emissaoFonte, 60), corta(a.fotoEm, 30),
     Number.isFinite(+a.difMin) && a.difMin !== null && a.difMin !== "" ? Math.round(+a.difMin * 10) / 10 : null,
     corta(a.detalhe, 300), agoraISO(), corta(a.ip, 60), corta(a.ipAnterior, 60),
-    g.chave_foto || null, g.chave_nf || null, g.hash_foto || null, g.hash_nf || null, corta(a.origem, 30)).run();
+    g.chave_foto || null, g.chave_nf || null, g.hash_foto || null, g.hash_nf || null, corta(a.origem, 30),
+    a.local ? a.local.lat : null, a.local ? a.local.lng : null, a.local ? a.local.precisao : null, a.distM ?? null).run();
 }
 
 /* Semáforo de IP por posto: últimos 5 logins do posto */
 async function semaforoIP(env) {
-  const postos = (await env.DB.prepare("SELECT id, nome, cnpj FROM postos ORDER BY nome COLLATE NOCASE").all()).results;
+  const postos = (await env.DB.prepare("SELECT id, nome, cnpj, lat, lng, usa_local FROM postos ORDER BY nome COLLATE NOCASE").all()).results;
   const res = [];
   for (const p of postos) {
     const ult = (await env.DB.prepare("SELECT ip, criado_em FROM acessos WHERE posto_id = ? AND ip IS NOT NULL AND ip <> '' ORDER BY id DESC LIMIT ?").bind(p.id, JANELA_IP).all()).results
@@ -329,17 +352,38 @@ async function semaforoIP(env) {
     if (ult.length >= 2 && ips.length > 1) { cor = "vermelho"; texto = `IP mudou nos últimos ${ult.length} logins`; }
     else if (ult.length >= MIN_IP_VERDE && ips.length === 1) { cor = "verde"; texto = `Mesmo IP nos últimos ${ult.length} logins`; }
     else if (ult.length === 2 && ips.length === 1) { cor = "cinza"; texto = "Mesmo IP, mas só 2 logins até agora"; }
-    res.push({ posto_id: p.id, posto_nome: p.nome, posto_cnpj: p.cnpj, cor, texto, logins: ult, ips });
+    res.push({ posto_id: p.id, posto_nome: p.nome, posto_cnpj: p.cnpj, cor, texto, logins: ult, ips, local: await semaforoLocal(env, p) });
   }
   return res;
 }
 
+/* Farol de localização: últimos 5 registros com localização (logins e envios) do posto */
+async function semaforoLocal(env, p) {
+  if (!p.usa_local) return { cor: "cinza", texto: "Posto sem controle de localização", registros: [] };
+  const local = temLocalCadastrado(p) ? { lat: p.lat, lng: p.lng } : null;
+  const regs = (await env.DB.prepare(`SELECT * FROM (
+      SELECT 'login' AS origem, lat, lng, precisao, dist_m, criado_em FROM acessos WHERE posto_id = ? AND lat IS NOT NULL
+      UNION ALL SELECT 'envio' AS origem, lat, lng, precisao, dist_m, recebido_em AS criado_em FROM fotos WHERE posto_id = ? AND lat IS NOT NULL
+    ) ORDER BY criado_em DESC LIMIT ?`).bind(p.id, p.id, JANELA_IP).all()).results
+    .map(r => ({ origem: r.origem, lat: r.lat, lng: r.lng, precisao: r.precisao, dist_m: r.dist_m, quando: brasilia(Date.parse(r.criado_em)).texto }));
+  const base = { registros: regs, lat: p.lat, lng: p.lng };
+  if (!local) return { ...base, cor: "cinza", texto: "Localização do posto não cadastrada" };
+  if (!regs.length) return { ...base, cor: "cinza", texto: "Nenhum registro com localização ainda" };
+  const longe = regs.filter(r => r.dist_m != null && r.dist_m > RAIO_LOCAL_M);
+  if (longe.length) return { ...base, cor: "vermelho", texto: `${longe.length} de ${regs.length} registros a mais de ${RAIO_LOCAL_M} m do posto (maior: ${fmtDist(Math.max(...longe.map(r => r.dist_m)))})` };
+  return { ...base, cor: "verde", texto: `Últimos ${regs.length} registros dentro de ${RAIO_LOCAL_M} m do posto` };
+}
+
 /* Registra cada login do posto e alerta quando o IP é diferente do login anterior (sem bloquear) */
-async function registrarAcesso(env, request, p) {
+async function registrarAcesso(env, request, p, local) {
   const ip = ipCliente(request);
+  const distM = local && temLocalCadastrado(p) ? distanciaM(local, p) : null;
   const anterior = await env.DB.prepare("SELECT ip FROM acessos WHERE posto_id = ? AND ip IS NOT NULL AND ip <> '' ORDER BY id DESC LIMIT 1").bind(p.id).first();
-  await env.DB.prepare("INSERT INTO acessos (posto_id, ip, navegador, cnpj_na_epoca, criado_em) VALUES (?, ?, ?, ?, ?)")
-    .bind(p.id, ip, corta(request.headers.get("user-agent"), 200), p.cnpj, agoraISO()).run();
+  await env.DB.prepare("INSERT INTO acessos (posto_id, ip, navegador, cnpj_na_epoca, criado_em, lat, lng, precisao, dist_m) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .bind(p.id, ip, corta(request.headers.get("user-agent"), 200), p.cnpj, agoraISO(), local ? local.lat : null, local ? local.lng : null, local ? local.precisao : null, distM).run();
+  if (distM != null && distM > RAIO_LOCAL_M)
+    await registrarAlerta(env, p.id, { tipo: "local_login", ip, local, distM, origem: "login",
+      detalhe: `Login aceito a ${fmtDist(distM)} do local cadastrado do posto${local.precisao != null ? ` (precisão informada pelo navegador: ±${fmtDist(local.precisao)})` : ""}.` });
   if (anterior && anterior.ip !== ip)
     await registrarAlerta(env, p.id, { tipo: "ip_login", ip, ipAnterior: anterior.ip, origem: "login", detalhe: "Login aceito; IP diferente do login anterior." });
 }
@@ -355,7 +399,7 @@ async function api(request, env, url) {
   if (caminho === "/api/time" && metodo === "GET") return json({ agora: agoraISO() });
 
   if (caminho === "/api/login" && metodo === "POST") {
-    const { usuario = "", senha = "" } = await request.json().catch(() => ({}));
+    const { usuario = "", senha = "", local: localBruto = null } = await request.json().catch(() => ({}));
     await new Promise(r => setTimeout(r, 300)); // freio simples contra tentativas em sequência
     const u = String(usuario).trim();
     // identifica a conta; o bloqueio vale por conta (admin: por conta + IP, já que ninguém pode desbloqueá-lo)
@@ -395,7 +439,11 @@ async function api(request, env, url) {
       await registrar(env, s, request, "login_matriz", ACOES.login_matriz);
       return json({ papel: "matriz" }, 200, { "set-cookie": await criarSessao(env, { r: "consulta", uid: conta.usr.id, s: conta.usr.salt.slice(0, 12) }) });
     }
-    await registrarAcesso(env, request, conta.p);
+    // posto com controle de localização: só entra se o navegador mandar a localização
+    const local = lerLocal(localBruto);
+    if (conta.p.usa_local && !local)
+      return erro("Para entrar, autorize o acesso à localização no navegador.", 428, { precisaLocal: true });
+    await registrarAcesso(env, request, conta.p, local);
     return json({ papel: "posto" }, 200, { "set-cookie": await criarSessao(env, { r: "posto", pid: conta.p.id, s: conta.p.salt.slice(0, 12) }) });
   }
 
@@ -583,7 +631,7 @@ async function api(request, env, url) {
   /* ----- postos (ver: toda a matriz; alterar: admin ou quem tem o poder "postos") ----- */
   if (caminho === "/api/postos" && metodo === "GET") {
     if (!s.matriz) return erro("Acesso só da matriz.", 403);
-    const r = await env.DB.prepare(`SELECT p.id, p.cnpj, p.nome, p.criado_em, p.atualizado_em,
+    const r = await env.DB.prepare(`SELECT p.id, p.cnpj, p.nome, p.criado_em, p.atualizado_em, p.lat, p.lng, p.usa_local,
       (SELECT COUNT(*) FROM fotos f WHERE f.posto_id = p.id) AS fotos,
       (SELECT COUNT(*) FROM alertas a WHERE a.posto_id = p.id AND a.visto = 0) AS alertas,
       (SELECT ip FROM acessos x WHERE x.posto_id = p.id ORDER BY x.id DESC LIMIT 1) AS ultimo_ip,
@@ -598,22 +646,24 @@ async function api(request, env, url) {
   }
   if (caminho.startsWith("/api/postos") && !pode(s, "postos")) return erro("Seu usuário não tem permissão para alterar postos.", 403);
   if (caminho === "/api/postos" && metodo === "POST") {
-    const { cnpj: c = "", nome = "", senha = "" } = await request.json().catch(() => ({}));
+    const corpo = await request.json().catch(() => ({}));
+    const { cnpj: c = "", nome = "", senha = "" } = corpo;
     const cnpj = normCNPJ(c), n = String(nome).trim().slice(0, 60);
     if (!validCNPJ(cnpj)) return erro("CNPJ inválido. Confira os dígitos.");
     if (!n) return erro("Informe o nome do posto.");
     if (String(senha).length < 4) return erro("A senha precisa ter pelo menos 4 caracteres.");
+    const loc = localDoCadastro(corpo); if (loc.erro) return erro(loc.erro);
     if (await env.DB.prepare("SELECT id FROM postos WHERE cnpj = ?").bind(cnpj).first()) return erro("Este CNPJ já está cadastrado.");
     const salt = aleatorio(16);
-    await env.DB.prepare("INSERT INTO postos (cnpj, nome, senha_hash, salt, criado_em) VALUES (?, ?, ?, ?, ?)")
-      .bind(cnpj, n, await hashSenha(String(senha), salt), salt, agoraISO()).run();
-    await registrar(env, s, request, "posto_criado", `Cadastrou o posto ${n} (CNPJ ${cnpj})`, { alvo: "posto:" + cnpj });
+    await env.DB.prepare("INSERT INTO postos (cnpj, nome, senha_hash, salt, criado_em, lat, lng, usa_local) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(cnpj, n, await hashSenha(String(senha), salt), salt, agoraISO(), loc.lat, loc.lng, loc.usa).run();
+    await registrar(env, s, request, "posto_criado", `Cadastrou o posto ${n} (CNPJ ${cnpj})${loc.lat != null ? `, local ${loc.lat}, ${loc.lng}` : ""}, controle de localização ${loc.usa ? "ligado" : "desligado"}`, { alvo: "posto:" + cnpj });
     return json({ ok: true });
   }
   m = caminho.match(/^\/api\/postos\/(\d+)(\/senha|\/desbloquear)?$/);
   if (m && metodo === "PUT") {
     const id = +m[1];
-    const p = await env.DB.prepare("SELECT id, cnpj, nome FROM postos WHERE id = ?").bind(id).first();
+    const p = await env.DB.prepare("SELECT id, cnpj, nome, lat, lng, usa_local FROM postos WHERE id = ?").bind(id).first();
     if (!p) return erro("Posto não encontrado.", 404);
     const corpo = await request.json().catch(() => ({}));
     if (m[2] === "/desbloquear") {
@@ -635,13 +685,30 @@ async function api(request, env, url) {
     if (!n) return erro("Informe o nome do posto.");
     const outro = await env.DB.prepare("SELECT id FROM postos WHERE cnpj = ? AND id <> ?").bind(cnpj, id).first();
     if (outro) return erro("Já existe outro posto com este CNPJ.");
-    await env.DB.prepare("UPDATE postos SET cnpj = ?, nome = ?, atualizado_em = ? WHERE id = ?").bind(cnpj, n, agoraISO(), id).run();
+    // localização: só muda se a tela mandou os campos (versões antigas da tela não mandam)
+    const temLoc = "lat" in corpo || "lng" in corpo || "usa_local" in corpo;
+    const loc = temLoc ? localDoCadastro(corpo) : { lat: p.lat, lng: p.lng, usa: p.usa_local ? 1 : 0 };
+    if (loc.erro) return erro(loc.erro);
+    await env.DB.prepare("UPDATE postos SET cnpj = ?, nome = ?, lat = ?, lng = ?, usa_local = ?, atualizado_em = ? WHERE id = ?").bind(cnpj, n, loc.lat, loc.lng, loc.usa, agoraISO(), id).run();
     const mud = []; if (cnpj !== p.cnpj) mud.push(`CNPJ ${p.cnpj} → ${cnpj}`); if (n !== p.nome) mud.push(`nome "${p.nome}" → "${n}"`);
+    const txtLoc = (a, b) => a == null ? "sem local" : `${a}, ${b}`;
+    if (loc.lat !== p.lat || loc.lng !== p.lng) mud.push(`local ${txtLoc(p.lat, p.lng)} → ${txtLoc(loc.lat, loc.lng)}`);
+    if (!!loc.usa !== !!p.usa_local) mud.push(`controle de localização ${loc.usa ? "ligado" : "desligado"}`);
     if (mud.length) await registrar(env, s, request, "posto_editado", `Editou o posto ${p.nome}: ${mud.join("; ")}`, { alvo: "posto:" + cnpj });
     return json({ ok: true });
   }
 
   return erro("Rota não encontrada.", 404);
+}
+
+/* latitude/longitude do cadastro do posto (aceita vírgula decimal) e caixa "usa localização" */
+function localDoCadastro(c) {
+  const num = v => v == null || String(v).trim() === "" ? null : +String(v).trim().replace(",", ".");
+  const lat = num(c.lat), lng = num(c.lng), usa = c.usa_local ? 1 : 0;
+  if ((lat == null) !== (lng == null)) return { erro: "Informe latitude e longitude juntas." };
+  if (lat != null && (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180)) return { erro: "Latitude ou longitude inválida. Exemplo: -23.550520 e -46.633308." };
+  if (usa && lat == null) return { erro: "Para usar o controle de localização, informe a latitude e a longitude do posto." };
+  return { lat: lat == null ? null : Math.round(lat * 1e6) / 1e6, lng: lng == null ? null : Math.round(lng * 1e6) / 1e6, usa };
 }
 
 async function entregarArquivo(env, chave, nome, ehPdf, baixar, opc = {}) {
@@ -723,6 +790,11 @@ async function receberFoto(request, env, posto) {
   const capBR = brasilia(cap);
   const ip = ipCliente(request);
   const ipCarimbo = corta(m.ipCarimbo, 60);
+  // localização do envio (obrigatória para posto com controle de localização)
+  const cad = await env.DB.prepare("SELECT lat, lng, usa_local FROM postos WHERE id = ?").bind(posto.id).first() || {};
+  const local = lerLocal(m.local);
+  if (cad.usa_local && !local) return erro("Não foi possível obter a localização. Autorize a localização no navegador e tire a foto de novo.", 422);
+  const distM = local && temLocalCadastrado(cad) ? distanciaM(local, cad) : null;
   const [hashFoto, hashNf] = await Promise.all([sha256(bytesFoto), sha256(bytesNf)]);
 
   // leitura da nota pelo servidor: é ela que vale para as conferências
@@ -787,15 +859,21 @@ async function receberFoto(request, env, posto) {
   const tipo = destDoc.length === 14 ? "PJ" : destDoc.length === 11 ? "PF" : "NI";
   await env.DB.prepare(`INSERT INTO fotos (posto_id, cliente, nota, arquivo, arquivo_nf, chave_foto, chave_nf, capturado_em, capturado_txt, cap_dia, recebido_em,
       dest_nome, dest_doc, dest_tipo, dest_origem, nf_numero, nf_serie, nf_modelo, nf_cnpj_emit, nf_emissao, nf_emissao_fonte, dif_min, cnpj_na_epoca, nome_na_epoca,
-      ip, ip_carimbo, hash_foto, hash_nf, verif_servidor, nf_chave, divergencia, dest_nome_pdf, dest_doc_pdf, chave_mini)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+      ip, ip_carimbo, hash_foto, hash_nf, verif_servidor, nf_chave, divergencia, dest_nome_pdf, dest_doc_pdf, chave_mini, lat, lng, precisao, dist_m)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
     posto.id, cliente, nota, arquivo, arquivoNf, chaveFoto, chaveNf, new Date(cap).toISOString(), capBR.texto, capBR.dia, agoraISO(),
     destNome, destDoc || null, tipo, m.destOrigem === "editado à mão" ? "editado à mão" : "lido do PDF",
     numeroNota, corta(lido ? lido.serie : n.serie, 5), corta(lido ? lido.modelo : n.modelo, 10),
     (lido ? lido.cnpjEmit : n.cnpjEmit) ? normCNPJ(lido ? lido.cnpjEmit : n.cnpjEmit) : null, emissaoTxt, corta(emissao.fonte, 60),
     Math.round(dif * 10) / 10, posto.cnpj, posto.nome,
     ip, ipCarimbo, hashFoto, hashNf, verif, lido && lido.chave ? lido.chave : null, divergencias.length ? divergencias.join("; ").slice(0, 500) : null,
-    lido && lido.dest ? corta(lido.dest.nome, 100) : null, lido && lido.dest ? corta(lido.dest.doc, 14) : null, chaveMini).run();
+    lido && lido.dest ? corta(lido.dest.nome, 100) : null, lido && lido.dest ? corta(lido.dest.doc, 14) : null, chaveMini,
+    local ? local.lat : null, local ? local.lng : null, local ? local.precisao : null, distM).run();
+
+  // envio aceito, mas feito longe do local cadastrado do posto: alerta para a matriz
+  if (distM != null && distM > RAIO_LOCAL_M)
+    await registrarAlerta(env, posto.id, { tipo: "local_envio", nota, cliente, fotoEm: capBR.texto, ip, local, distM, origem: "servidor",
+      detalhe: `Envio aceito a ${fmtDist(distM)} do local cadastrado do posto${local.precisao != null ? ` (precisão informada pelo navegador: ±${fmtDist(local.precisao)})` : ""}. Arquivo ${arquivo}.` });
 
   return json({ ok: true, arquivo, arquivoNf, hashFoto, verificacao: verif });
 }
@@ -831,10 +909,10 @@ async function listarFotos(env, s, q) {
   const total = await env.DB.prepare(`SELECT COUNT(*) AS n FROM fotos f LEFT JOIN postos p ON p.id = f.posto_id ${where}`).bind(...args).first();
   const r = await env.DB.prepare(`SELECT f.id, f.posto_id, f.cliente, f.nota, f.arquivo, f.arquivo_nf, f.capturado_txt, f.cap_dia, f.recebido_em,
       f.dest_nome, f.dest_doc, f.dest_tipo, f.dest_origem, f.nf_emissao, f.nf_emissao_fonte, f.dif_min, f.nf_serie, f.nf_modelo, f.nf_cnpj_emit, f.nf_chave,
-      f.ip, f.ip_carimbo, f.hash_foto, f.hash_nf, f.verif_servidor, f.divergencia, (f.chave_mini IS NOT NULL) AS tem_mini,
+      f.ip, f.ip_carimbo, f.hash_foto, f.hash_nf, f.verif_servidor, f.divergencia, (f.chave_mini IS NOT NULL) AS tem_mini, f.lat, f.lng, f.precisao, f.dist_m,
       p.nome AS posto_nome, p.cnpj AS posto_cnpj
       FROM fotos f LEFT JOIN postos p ON p.id = f.posto_id ${where} ORDER BY f.capturado_em DESC LIMIT ${limite}`).bind(...args).all();
-  const ocultarDoPosto = ["arquivo_nf", "ip", "ip_carimbo", "hash_foto", "hash_nf", "verif_servidor", "divergencia", "nf_chave", "nf_cnpj_emit", "recebido_em"];
+  const ocultarDoPosto = ["arquivo_nf", "ip", "ip_carimbo", "hash_foto", "hash_nf", "verif_servidor", "divergencia", "nf_chave", "nf_cnpj_emit", "recebido_em", "lat", "lng", "precisao", "dist_m"];
   const fotos = r.results.map(f => { if (s.matriz) return f; const o = { ...f }; ocultarDoPosto.forEach(k => delete o[k]); return o; });
   const geral = s.posto
     ? await env.DB.prepare("SELECT COUNT(*) AS n FROM fotos WHERE posto_id = ?").bind(s.posto.id).first()
@@ -900,7 +978,7 @@ export default {
     const r = new Response(resp.body, resp);
     r.headers.set("x-content-type-options", "nosniff");
     r.headers.set("referrer-policy", "same-origin");
-    r.headers.set("permissions-policy", "camera=(self), microphone=(), geolocation=()");
+    r.headers.set("permissions-policy", "camera=(self), microphone=(), geolocation=(self)");
     r.headers.set("x-frame-options", "DENY");
     return r;
   }

@@ -152,8 +152,9 @@ body.nao-admin .req-admin, body.sem-baixar .req-baixar, body.sem-alertas .req-al
 .item .seg{font-size:.8rem;margin-top:2px}
 .item .seg .chip{margin-left:0;margin-right:6px}
 .diverg{color:var(--amber);font-size:.8rem;margin-top:2px}
-.sem{display:grid;grid-template-columns:22px minmax(0,1fr);gap:10px;align-items:start;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
-.sem .ips{font-size:.78rem;overflow-wrap:anywhere}
+.sem{display:grid;grid-template-columns:22px minmax(0,1fr);gap:6px 10px;align-items:start;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.sem .ips,.sem .locs{font-size:.78rem;overflow-wrap:anywhere}
+.sem .locs a{color:inherit}
 .luz{width:16px;height:16px;border-radius:50%;margin-top:3px;background:var(--line);box-shadow:0 0 0 3px color-mix(in srgb, var(--line) 35%, transparent)}
 .luz.verde{background:#1f9d55;box-shadow:0 0 0 3px rgba(31,157,85,.25)}
 .luz.vermelho{background:#d92d20;box-shadow:0 0 0 3px rgba(217,45,32,.25)}

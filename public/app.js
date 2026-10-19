@@ -73,13 +73,39 @@ function irLogin(msg){
 }
 $$(".sair").forEach(b => b.onclick = async () => { try { await api("/api/logout", { method:"POST" }); } catch {} irLogin(); });
 
+/* ---------- localização do aparelho (só para postos com controle de localização) ---------- */
+function pegarLocal(maxIdadeMs = 0){
+  return new Promise((ok, falha) => {
+    if (!window.isSecureContext || !navigator.geolocation) return falha(new Error("Este navegador não informa a localização. Use o Chrome, Edge ou Safari atualizado."));
+    navigator.geolocation.getCurrentPosition(
+      p => ok({ lat: +p.coords.latitude.toFixed(6), lng: +p.coords.longitude.toFixed(6), precisao: Math.round(p.coords.accuracy) }),
+      e => falha(new Error(e.code === 1
+        ? "Localização bloqueada. Libere a localização deste site no navegador (ícone ao lado do endereço) e tente de novo."
+        : "Não foi possível obter a localização agora. Verifique se a localização do aparelho está ligada e tente de novo.")),
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: maxIdadeMs });
+  });
+}
+const linkMapa = (lat, lng) => `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+const fmtDist = m => m == null ? "" : m >= 1000 ? `${(m/1000).toFixed(1).replace(".", ",")} km` : `${m} m`;
+function aMapa(lat, lng, texto){ const a = document.createElement("a"); a.href = linkMapa(lat, lng); a.target = "_blank"; a.rel = "noopener noreferrer"; a.textContent = texto || "Ver no mapa"; return a; }
+
 $("#lUsuario").addEventListener("input", e => { const v = e.target.value; if (/^\d/.test(v)) e.target.value = maskCNPJ(v); });
 $("#fEntrar").addEventListener("submit", async e => {
   e.preventDefault();
   const usuario = $("#lUsuario").value.trim(), senha = $("#lSenha").value;
   if (/^\d/.test(usuario) && !validCNPJ(usuario)) return showMsg($("#lMsg"), "CNPJ inválido. Confira os dígitos.");
   $("#lBtn").disabled = true;
-  try { await api("/api/login", { method:"POST", body:{ usuario, senha } }); showMsg($("#lMsg"), ""); await iniciar(); }
+  try {
+    try { await api("/api/login", { method:"POST", body:{ usuario, senha } }); }
+    catch (err) {
+      // posto com controle de localização: o navegador pede a autorização e o login é refeito com a posição
+      if (!(err.status === 428 && err.dados && err.dados.precisaLocal)) throw err;
+      showMsg($("#lMsg"), "Este acesso exige a localização. Autorize no aviso do navegador…", "ok");
+      const local = await pegarLocal();
+      await api("/api/login", { method:"POST", body:{ usuario, senha, local } });
+    }
+    showMsg($("#lMsg"), ""); await iniciar();
+  }
   catch (err) { showMsg($("#lMsg"), err.message); }
   finally { $("#lBtn").disabled = false; }
 });
@@ -322,6 +348,13 @@ $("#btnFoto").onclick = async () => {
   if (!stream || !video.videoWidth) return showMsg($("#capMsg"), "A câmera ainda não está pronta.");
   if (!cliente || !nota) return showMsg($("#capMsg"), "Preencha cliente/motorista e número da nota antes da foto.");
   try { await document.fonts.load("700 20px 'JetBrains Mono'"); } catch {}
+  let local = null;
+  if (posto.usa_local){
+    showMsg($("#capMsg"), "Obtendo a localização…", "ok");
+    try { local = await pegarLocal(30000); }
+    catch (e) { return showMsg($("#capMsg"), e.message + " Sem a localização, a foto não pode ser registrada."); }
+    showMsg($("#capMsg"), "");
+  }
   const ip = await atualizarIP();
   const quando = agora(), p = brt(quando);
   const w = video.videoWidth, h = video.videoHeight;
@@ -334,6 +367,7 @@ $("#btnFoto").onclick = async () => {
     `Cliente/Motorista: ${cliente}  |  Nota: ${nota}`,
     `IP: ${ip || "não identificado"}`
   ];
+  if (local) linhas.push(`Local: ${local.lat.toFixed(6)}, ${local.lng.toFixed(6)}  (precisão ±${local.precisao} m)`);
   const bandH = linhas.length*lh + pad*2;
   ctx.fillStyle = "rgba(0,0,0,0.74)"; ctx.fillRect(0, h-bandH, w, bandH);
   ctx.fillStyle = "#f0b429"; ctx.fillRect(0, h-bandH, w, Math.max(2, Math.round(fs/6)));
@@ -346,7 +380,7 @@ $("#btnFoto").onclick = async () => {
   const blob = await new Promise(r => cv.toBlob(r, "image/jpeg", 0.9));
   let mini = null; try { mini = await miniBorrada(cv); } catch {}
   if (pendente) URL.revokeObjectURL(pendente.url);
-  pendente = { blob, mini, url: URL.createObjectURL(blob), capturadoMs: quando.getTime(), brasilia: brtTexto(p), nota, cliente, ip };
+  pendente = { blob, mini, local, url: URL.createObjectURL(blob), capturadoMs: quando.getTime(), brasilia: brtTexto(p), nota, cliente, ip };
   $("#preview").src = pendente.url; $("#preview").hidden = false; video.hidden = true;
   $("#capActions").hidden = true; $("#revActions").hidden = false;
   atualizaBotao();
@@ -381,7 +415,7 @@ $("#btnSalvar").onclick = async () => {
   fd.append("nf", nf.arquivo, "nota.pdf");
   if (pendente.mini) fd.append("mini", pendente.mini, "mini.jpg");
   fd.append("meta", JSON.stringify({
-    cliente: pendente.cliente, nota: pendente.nota, capturadoEm: new Date(pendente.capturadoMs).toISOString(), ipCarimbo: pendente.ip || "",
+    cliente: pendente.cliente, nota: pendente.nota, capturadoEm: new Date(pendente.capturadoMs).toISOString(), ipCarimbo: pendente.ip || "", local: pendente.local || null,
     destNome, destDoc, destOrigem: editado ? "editado à mão" : "lido do PDF",
     nf: { numero: nf.numero, serie: nf.serie || "", modelo: nf.modelo || "", cnpjEmit: nf.cnpjEmit || "", emissaoMs: nf.emissao.ms, emissaoFonte: nf.emissao.fonte }
   }));
@@ -469,6 +503,7 @@ function montaItem(f, ehMatriz){
     seg.appendChild(chip);
     const info = [];
     if (f.ip) info.push(`IP ${f.ip}`);
+    if (f.dist_m != null) info.push(`${fmtDist(f.dist_m)} do posto`);
     if (f.hash_foto) info.push(`hash ${curto(f.hash_foto)}`);
     if (info.length) seg.appendChild(document.createTextNode(" " + info.join(" · ")));
     if (f.divergencia){ const d = document.createElement("div"); d.className = "diverg"; d.textContent = "⚠ " + f.divergencia; seg.appendChild(d); }
@@ -477,6 +512,8 @@ function montaItem(f, ehMatriz){
   if (ehMatriz){
     const ver = () => abrirViewer(src, f.arquivo, f.hash_foto, false);
     el.querySelector('[data-a="ver"]').onclick = ver;
+    if (f.lat != null){ const am = aMapa(f.lat, f.lng); am.className = "btn"; am.title = `${f.lat}, ${f.lng}` + (f.precisao != null ? ` (precisão ±${f.precisao} m)` : ""); el.querySelector(".row").appendChild(am); }
+    if (f.dist_m != null && f.dist_m > 500){ const d = document.createElement("div"); d.className = "diverg"; d.textContent = `⚠ Foto tirada a ${fmtDist(f.dist_m)} do local cadastrado do posto`; seg.appendChild(d); }
     el.querySelector("img").onclick = ver;
     if (tenho("baixar")){
       const row = el.querySelector(".row");
@@ -603,6 +640,8 @@ $("#aExcel").onclick = async () => {
       "Conferência no servidor": f.verif_servidor || "anterior à conferência no servidor",
       "Divergências": f.divergencia || "",
       "IP do envio": f.ip || "", "IP no carimbo": f.ip_carimbo || "",
+      "Latitude": f.lat ?? "", "Longitude": f.lng ?? "", "Precisão da localização (m)": f.precisao ?? "",
+      "Distância do posto (m)": f.dist_m ?? "", "Mapa": f.lat != null ? linkMapa(f.lat, f.lng) : "",
       "Hash SHA-256 da foto": f.hash_foto || "", "Hash SHA-256 da NF": f.hash_nf || "",
       "Chave de acesso": f.nf_chave || "", "CNPJ emitente": maskCNPJ(f.nf_cnpj_emit || ""),
       "Arquivo da foto": f.arquivo, "Arquivo da NF": f.arquivo_nf
@@ -626,7 +665,7 @@ async function contarAlertas(){
   try { const r = await api("/api/alertas"); atualizarBadge(r); } catch {}
 }
 function atualizarBadge(r){
-  const vermelhos = (r.semaforo || []).filter(x => x.cor === "vermelho").length;
+  const vermelhos = (r.semaforo || []).filter(x => x.cor === "vermelho" || (x.local && x.local.cor === "vermelho")).length;
   const n = r.abertos; $("#nAlertas").textContent = n || (vermelhos ? "!" : 0); $("#nAlertas").hidden = !n && !vermelhos;
 }
 setInterval(() => { if (!$("#admin").hidden) contarAlertas(); }, 60000);
@@ -639,33 +678,46 @@ async function listarAlertas(){
     if (!r.semaforo.length) sem.innerHTML = `<div class="empty">Nenhum posto cadastrado.</div>`;
     r.semaforo.forEach(x => {
       const el = document.createElement("div"); el.className = "sem";
-      el.innerHTML = `<span class="luz"></span><div style="min-width:0"><b class="pn"></b><div class="hint tx"></div><div class="mono hint ips"></div></div>`;
+      el.innerHTML = `<span class="luz"></span><div style="min-width:0"><b class="pn"></b><div class="hint tx"></div><div class="mono hint ips"></div></div>
+        <span class="luz loc"></span><div style="min-width:0"><div class="hint txl"></div><div class="mono hint locs"></div></div>`;
       el.querySelector(".luz").className = "luz " + x.cor;
       el.querySelector(".luz").title = x.cor === "verde" ? "Sem alteração de IP" : x.cor === "vermelho" ? "IP alterado" : "Histórico insuficiente";
       el.querySelector(".pn").textContent = `${x.posto_nome} · CNPJ ${maskCNPJ(x.posto_cnpj)}`;
       el.querySelector(".tx").textContent = x.texto;
       el.querySelector(".ips").textContent = (x.logins || []).map(e => `${e.ip} (${e.quando})`).join("  ·  ");
+      const lc = x.local || { cor: "cinza", texto: "", registros: [] };
+      el.querySelector(".luz.loc").className = "luz loc " + lc.cor;
+      el.querySelector(".luz.loc").title = lc.cor === "verde" ? "Dentro de 500 m do posto" : lc.cor === "vermelho" ? "Fora de 500 m do posto" : "Sem dados de localização";
+      el.querySelector(".txl").textContent = "Localização: " + lc.texto;
+      const locs = el.querySelector(".locs");
+      if (lc.lat != null){ locs.appendChild(aMapa(lc.lat, lc.lng, "local do posto")); }
+      (lc.registros || []).forEach(g => {
+        locs.appendChild(document.createTextNode("  ·  "));
+        locs.appendChild(aMapa(g.lat, g.lng, `${g.origem} ${g.quando}${g.dist_m != null ? ` a ${fmtDist(g.dist_m)}` : ""}`));
+      });
       sem.appendChild(el);
     });
     lista.innerHTML = "";
     if (!r.alertas.length){ lista.innerHTML = `<div class="empty">Nenhum alerta ${$("#alTodos").checked ? "registrado" : "em aberto"}.</div>`; return; }
     r.alertas.forEach(a => {
-      const ehIP = a.tipo === "ip_alterado" || a.tipo === "ip_login";
+      const ehIP = a.tipo === "ip_alterado" || a.tipo === "ip_login" || a.tipo === "local_login" || a.tipo === "local_envio";
       const el = document.createElement("div"); el.className = "al" + (a.visto ? " visto" : "") + (ehIP ? " ip" : "");
       el.innerHTML = `<div class="al-corpo"><div class="al-texto"><div class="row" style="justify-content:space-between"><div><span class="chip erro"></span> <b class="pn"></b></div><span class="mono hint quando"></span></div><div class="det d1"></div><div class="det d2"></div><div class="det d3"></div><div class="row acoes"></div></div></div>`;
       el.querySelector(".chip").textContent = a.tipo_txt;
       el.querySelector(".pn").textContent = a.posto_nome ? `${a.posto_nome} · CNPJ ${maskCNPJ(a.posto_cnpj || "")}` : "Matriz";
       el.querySelector(".quando").textContent = "Registrado em " + brtTexto(brt(new Date(a.criado_em)));
-      el.querySelector(".d1").textContent = a.tipo === "ip_login" ? "Login do posto" : a.tipo === "bloqueio" ? "Tentativas de login" : `Nota ${a.nota || "?"} · Motorista: ${a.cliente || "?"} · Foto: ${a.foto_em || "?"}`;
+      el.querySelector(".d1").textContent = a.tipo === "ip_login" || a.tipo === "local_login" ? "Login do posto" : a.tipo === "bloqueio" ? "Tentativas de login" : `Nota ${a.nota || "?"} · Motorista: ${a.cliente || "?"} · Foto: ${a.foto_em || "?"}`;
       el.querySelector(".d2").textContent = a.tipo === "atraso"
         ? `Horário da nota ${a.emissao || "?"} · Diferença ${a.dif_min != null ? a.dif_min + " min" : "?"}${a.emissao_fonte ? " (" + a.emissao_fonte + ")" : ""}`
         : a.tipo === "ip_login" ? `IP do login anterior ${a.ip_anterior || "?"} → IP deste login ${a.ip || "?"} (acesso liberado)`
         : a.tipo === "ip_alterado" ? `IP anterior ${a.ip_anterior || "?"} → IP deste envio ${a.ip || "?"} (envio aceito)`
         : a.tipo === "bloqueio" ? (a.detalhe || "Conta bloqueada por senhas erradas.")
+        : a.tipo === "local_login" || a.tipo === "local_envio" ? (a.detalhe || `A ${fmtDist(a.dist_m)} do local cadastrado do posto`) + (a.ip ? ` · IP ${a.ip}` : "")
         : "Horário da nota (hora da saída) não encontrado no PDF";
       el.querySelector(".d3").textContent = [a.ip && !ehIP && a.tipo !== "bloqueio" ? `IP ${a.ip}` : "", a.hash_foto ? `hash da foto ${curto(a.hash_foto)}` : ""].filter(Boolean).join(" · ");
       if (a.hash_foto) el.querySelector(".d3").title = `Hash SHA-256 da foto: ${a.hash_foto}` + (a.hash_nf ? `\nHash SHA-256 da NF: ${a.hash_nf}` : "");
       const acoes = el.querySelector(".acoes");
+      if (a.lat != null){ const am = aMapa(a.lat, a.lng); am.className = "btn"; acoes.appendChild(am); }
       if (a.tem_foto){
         const img = document.createElement("img"); img.className = "al-img"; img.alt = "Foto da tentativa"; img.loading = "lazy"; img.src = `/api/alertas/${a.id}/foto`;
         const abrir = () => abrirViewer(img.src, `Alerta · ${a.posto_nome || ""} · nota ${a.nota || "?"} · ${a.foto_em || ""}`, a.hash_foto, false);
@@ -691,12 +743,21 @@ $("#fNovoPosto").addEventListener("submit", async e => {
   const cnpj = $("#nCnpj").value, nome = $("#nNome").value.trim(), senha = $("#nSenha").value;
   if (!validCNPJ(cnpj)) return showMsg($("#nMsg"), "CNPJ inválido. Confira os dígitos.");
   try {
-    await api("/api/postos", { method:"POST", body:{ cnpj, nome, senha } });
-    $("#nCnpj").value = ""; $("#nNome").value = ""; $("#nSenha").value = "";
+    await api("/api/postos", { method:"POST", body:{ cnpj, nome, senha, lat: $("#nLat").value, lng: $("#nLng").value, usa_local: $("#nUsaLocal").checked } });
+    $("#nCnpj").value = ""; $("#nNome").value = ""; $("#nSenha").value = ""; $("#nLat").value = ""; $("#nLng").value = ""; $("#nUsaLocal").checked = false;
     showMsg($("#nMsg"), `“${nome}” cadastrado. O posto já pode entrar com o CNPJ e a senha.`, "ok");
     listarPostos();
   } catch (err) { showMsg($("#nMsg"), err.message); }
 });
+/* colar "-23.55, -46.63" (como o Google Maps copia) no campo latitude preenche os dois campos */
+function colarCoordenadas(iLat, iLng){
+  iLat.addEventListener("paste", e => {
+    const t = (e.clipboardData || window.clipboardData).getData("text");
+    const m = t.match(/(-?\d{1,2}[.,]\d+)\s*[,;\s]\s*(-?\d{1,3}[.,]\d+)/);
+    if (m){ e.preventDefault(); iLat.value = m[1].replace(",", "."); iLng.value = m[2].replace(",", "."); }
+  });
+}
+colarCoordenadas($("#nLat"), $("#nLng"));
 async function listarPostos(){
   const box = $("#psLista");
   try {
@@ -712,6 +773,8 @@ function montaPosto(p, podeAlterar){
     <div class="row" style="justify-content:space-between"><div><b class="pn"></b><div class="mono hint pc"></div><div class="bloq" hidden></div></div><div class="row"><button data-a="desbloquear" hidden>Desbloquear</button><button data-a="editar">Editar posto</button></div></div>
     <div class="stack ed" hidden>
       <div class="fields"><div><label>CNPJ do posto</label><input class="mono e-cnpj"></div><div><label>Nome do posto</label><input class="e-nome" maxlength="60"></div></div>
+      <div class="fields3"><div><label>Latitude</label><input class="mono e-lat" inputmode="decimal" placeholder="-23.550520"></div><div><label>Longitude</label><input class="mono e-lng" inputmode="decimal" placeholder="-46.633308"></div>
+        <div style="align-self:end"><label class="check"><input type="checkbox" class="e-usa"> Usa controle de localização</label></div></div>
       <div class="row"><button class="primary" data-a="salvar">Salvar alterações</button><button data-a="cancelar">Cancelar</button></div>
       <span class="hint">As fotos e alertas continuam vinculados a este posto. O posto passa a entrar com o CNPJ novo.</span>
     </div>
@@ -721,17 +784,23 @@ function montaPosto(p, podeAlterar){
   el.querySelector(".pc").textContent = `CNPJ ${maskCNPJ(p.cnpj)} · ${p.fotos} ${p.fotos===1?"foto":"fotos"}` + (p.alertas ? ` · ${p.alertas} alerta(s) em aberto` : "")
     + (p.ultimo_login_txt ? ` · último login ${p.ultimo_login_txt} (IP ${p.ultimo_ip})` : " · ainda não fez login");
   if (p.bloqueado_ate_txt){ const b = el.querySelector(".bloq"); b.hidden = false; b.textContent = `Bloqueado por senhas erradas até ${p.bloqueado_ate_txt}`; }
+  const lc = document.createElement("div"); lc.className = "mono hint";
+  lc.textContent = (p.usa_local ? "Controle de localização ligado" : "Controle de localização desligado") + (p.lat != null ? ` · local ${p.lat}, ${p.lng} · ` : " · local não cadastrado");
+  if (p.lat != null) lc.appendChild(aMapa(p.lat, p.lng));
+  el.querySelector(".pc").after(lc);
   if (!podeAlterar){ el.querySelector('[data-a="editar"]').remove(); el.querySelector('[data-a="desbloquear"]').remove(); el.querySelector(".l-senha").remove(); return el; }
   const msg = el.querySelector(".msg"), ed = el.querySelector(".ed");
   const iC = el.querySelector(".e-cnpj"), iN = el.querySelector(".e-nome");
   const bD = el.querySelector('[data-a="desbloquear"]'); bD.hidden = !p.bloqueado_ate_txt;
   bD.onclick = async () => { try { await api(`/api/postos/${p.id}/desbloquear`, { method:"PUT", body:{} }); listarPostos(); } catch (e) { showMsg(msg, e.message); } };
   iC.addEventListener("input", () => { iC.value = maskCNPJ(iC.value); });
-  el.querySelector('[data-a="editar"]').onclick = () => { iC.value = maskCNPJ(p.cnpj); iN.value = p.nome; ed.hidden = false; showMsg(msg, ""); };
+  const iLat = el.querySelector(".e-lat"), iLng = el.querySelector(".e-lng"), iUsa = el.querySelector(".e-usa");
+  colarCoordenadas(iLat, iLng);
+  el.querySelector('[data-a="editar"]').onclick = () => { iC.value = maskCNPJ(p.cnpj); iN.value = p.nome; iLat.value = p.lat ?? ""; iLng.value = p.lng ?? ""; iUsa.checked = !!p.usa_local; ed.hidden = false; showMsg(msg, ""); };
   el.querySelector('[data-a="cancelar"]').onclick = () => { ed.hidden = true; };
   el.querySelector('[data-a="salvar"]').onclick = async () => {
     if (!validCNPJ(iC.value)) return showMsg(msg, "CNPJ inválido. Confira os dígitos.");
-    try { await api(`/api/postos/${p.id}`, { method:"PUT", body:{ cnpj: iC.value, nome: iN.value } }); listarPostos(); carregarOpcoesAdmin(); }
+    try { await api(`/api/postos/${p.id}`, { method:"PUT", body:{ cnpj: iC.value, nome: iN.value, lat: iLat.value, lng: iLng.value, usa_local: iUsa.checked } }); listarPostos(); carregarOpcoesAdmin(); }
     catch (e) { showMsg(msg, e.message); }
   };
   el.querySelector('[data-a="senha"]').onclick = async () => {
