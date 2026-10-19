@@ -341,12 +341,22 @@ function enviarAlerta(v){
   api("/api/alertas", { method:"POST", body: fd }).catch(() => alertasEnviados.delete(chave));
 }
 
+/* ----- nota única: cada nota só pode ser enviada uma vez pelo posto ----- */
+async function checarNotaRepetida(){
+  const n = $("#fNota").value.trim();
+  if (!numInt(n)) return "";
+  try { const r = await api("/api/nota-enviada?nota=" + encodeURIComponent(n)); return r.enviada ? r.mensagem : ""; } catch { return ""; }
+}
+$("#fNota").addEventListener("change", async () => { const m = await checarNotaRepetida(); if (m) showMsg($("#capMsg"), m); });
+
 /* ----- captura com carimbo ----- */
 function cortar(ctx, txt, max){ if (ctx.measureText(txt).width <= max) return txt; while (txt.length && ctx.measureText(txt+"…").width > max) txt = txt.slice(0,-1); return txt+"…"; }
 $("#btnFoto").onclick = async () => {
   const cliente = $("#fCliente").value.trim(), nota = $("#fNota").value.trim();
   if (!stream || !video.videoWidth) return showMsg($("#capMsg"), "A câmera ainda não está pronta.");
   if (!cliente || !nota) return showMsg($("#capMsg"), "Preencha cliente/motorista e número da nota antes da foto.");
+  const repetida = await checarNotaRepetida();
+  if (repetida) return showMsg($("#capMsg"), repetida);
   try { await document.fonts.load("700 20px 'JetBrains Mono'"); } catch {}
   let local = null;
   if (posto.usa_local){

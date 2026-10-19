@@ -95,17 +95,36 @@ function validCPF(s) {
 function ipPrivado(ip) {
   return !ip || /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|0\.)/.test(ip) || /^(::1|fc|fd|fe80)/i.test(ip);
 }
-function ipCliente(request) {
-  const limpa = v => {
-    let t = String(v || "").trim(); if (!t) return "";
-    let m = t.match(/^\[([^\]]+)\](?::\d+)?$/); if (m) return m[1];
-    t = t.replace(/^::ffff:/i, "");
-    m = t.match(/^(\d+\.\d+\.\d+\.\d+)(?::\d+)?$/); if (m) return m[1];
-    return t;
-  };
-  const lista = (request.headers.get("x-forwarded-for") || "").split(",").map(limpa).filter(Boolean).reverse();
+function limpaIP(v) {
+  let t = String(v || "").trim(); if (!t) return "";
+  let m = t.match(/^\[([^\]]+)\](?::\d+)?$/); if (m) return m[1];
+  t = t.replace(/^::ffff:/i, "");
+  m = t.match(/^(\d+\.\d+\.\d+\.\d+)(?::\d+)?$/); if (m) return m[1];
+  return t;
+}
+function ipCliente(request) { return origemIP(request, limpaIP).ip; }
+/* IP real do navegador atrás do Railway.
+   O Railway monta "X-Forwarded-For: <IP do cliente>, <IP do CDN do Railway>" e põe o IP do cliente em "X-Real-IP".
+   Antes o sistema pegava o último IP público da lista, que é o do CDN do Railway (sempre o mesmo para todos).
+   Agora: X-Real-IP (escrito pela borda do Railway); se ele vier igual ao último salto da lista (falha conhecida
+   do Railway com o CDN ligado), vale o primeiro IP público do X-Forwarded-For. */
+function origemIP(request, limpa) {
+  const lista = (request.headers.get("x-forwarded-for") || "").split(",").map(limpa).filter(Boolean);
+  const real = limpa(request.headers.get("x-real-ip"));
   const socket = limpa(request.headers.get("x-ip-socket"));
-  return lista.find(ip => !ipPrivado(ip)) || lista[0] || socket || "desconhecido";
+  const ultimoSalto = lista.length > 1 ? lista[lista.length - 1] : null;
+  let ip, fonte;
+  if (real && !ipPrivado(real) && real !== ultimoSalto) { ip = real; fonte = "X-Real-IP"; }
+  else if (lista.find(x => !ipPrivado(x))) { ip = lista.find(x => !ipPrivado(x)); fonte = "X-Forwarded-For (primeiro IP público)"; }
+  else { ip = real || lista[0] || socket || "desconhecido"; fonte = real ? "X-Real-IP" : lista[0] ? "X-Forwarded-For" : "conexão direta"; }
+  return { ip, fonte, xff: lista.join(", "), xRealIp: real, socket };
+}
+/* data a partir da qual o IP passou a ser o do navegador (logins anteriores guardaram o IP do CDN do Railway) */
+let ipRealDesdeCache = null;
+async function ipRealDesde(env) {
+  if (ipRealDesdeCache) return ipRealDesdeCache;
+  await env.DB.prepare("INSERT OR IGNORE INTO config (k, v) VALUES ('ip_real_desde', ?)").bind(agoraISO()).run();
+  return ipRealDesdeCache = (await env.DB.prepare("SELECT v FROM config WHERE k = 'ip_real_desde'").first()).v;
 }
 
 /* ---------- banco: criação e migração (só acrescenta) ---------- */
@@ -164,6 +183,7 @@ function preparar(env) {
         for (const [col, tipo] of Object.entries(cols)) if (!atuais.has(col)) await env.DB.prepare(`ALTER TABLE ${tabela} ADD COLUMN ${col} ${tipo}`).run();
       }
       await env.DB.prepare(`CREATE INDEX IF NOT EXISTS ix_fotos_ip ON fotos(posto_id, id)`).run();
+      await ipRealDesde(env);
     })().catch(e => { preparo = null; throw e; });
   }
   return preparo;
@@ -262,7 +282,8 @@ const ACOES = {
   baixou_zip: "Baixou .zip", gerou_excel: "Gerou relatório Excel",
   posto_criado: "Cadastrou posto", posto_editado: "Editou posto", posto_senha: "Trocou senha de posto", posto_desbloqueado: "Desbloqueou posto",
   usuario_criado: "Criou usuário da matriz", usuario_editado: "Alterou usuário da matriz", usuario_senha: "Trocou senha de usuário da matriz", usuario_desbloqueado: "Desbloqueou usuário da matriz",
-  alerta_visto: "Marcou alerta como visto", bloqueio: "Bloqueio por senhas erradas", posto_abriu_foto: "Posto abriu foto"
+  alerta_visto: "Marcou alerta como visto", bloqueio: "Bloqueio por senhas erradas", posto_abriu_foto: "Posto abriu foto",
+  nota_repetida: "Posto tentou repetir nota"
 };
 
 /* ---------- bloqueio após tentativas erradas ---------- */
@@ -345,7 +366,7 @@ async function semaforoIP(env) {
   const postos = (await env.DB.prepare("SELECT id, nome, cnpj, lat, lng, usa_local FROM postos ORDER BY nome COLLATE NOCASE").all()).results;
   const res = [];
   for (const p of postos) {
-    const ult = (await env.DB.prepare("SELECT ip, criado_em FROM acessos WHERE posto_id = ? AND ip IS NOT NULL AND ip <> '' ORDER BY id DESC LIMIT ?").bind(p.id, JANELA_IP).all()).results
+    const ult = (await env.DB.prepare("SELECT ip, criado_em FROM acessos WHERE posto_id = ? AND ip IS NOT NULL AND ip <> '' AND criado_em >= ? ORDER BY id DESC LIMIT ?").bind(p.id, await ipRealDesde(env), JANELA_IP).all()).results
       .map(u => ({ ip: u.ip, quando: brasilia(Date.parse(u.criado_em)).texto }));
     const ips = [...new Set(ult.map(u => u.ip))];
     let cor = "cinza", texto = ult.length ? "Histórico insuficiente: só 1 login registrado (primeiro acesso não conta)" : "Nenhum login registrado ainda";
@@ -378,7 +399,7 @@ async function semaforoLocal(env, p) {
 async function registrarAcesso(env, request, p, local) {
   const ip = ipCliente(request);
   const distM = local && temLocalCadastrado(p) ? distanciaM(local, p) : null;
-  const anterior = await env.DB.prepare("SELECT ip FROM acessos WHERE posto_id = ? AND ip IS NOT NULL AND ip <> '' ORDER BY id DESC LIMIT 1").bind(p.id).first();
+  const anterior = await env.DB.prepare("SELECT ip FROM acessos WHERE posto_id = ? AND ip IS NOT NULL AND ip <> '' AND criado_em >= ? ORDER BY id DESC LIMIT 1").bind(p.id, await ipRealDesde(env)).first();
   await env.DB.prepare("INSERT INTO acessos (posto_id, ip, navegador, cnpj_na_epoca, criado_em, lat, lng, precisao, dist_m) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
     .bind(p.id, ip, corta(request.headers.get("user-agent"), 200), p.cnpj, agoraISO(), local ? local.lat : null, local ? local.lng : null, local ? local.precisao : null, distM).run();
   if (distM != null && distM > RAIO_LOCAL_M)
@@ -457,6 +478,11 @@ async function api(request, env, url) {
     return json({ papel: "posto", posto: s.posto });
   }
   if (caminho === "/api/ip" && metodo === "GET") return json({ ip: ipCliente(request) });
+  if (caminho === "/api/nota-enviada" && metodo === "GET") {
+    if (!s.posto) return erro("Só o acesso do posto.", 403);
+    const f = await notaJaEnviada(env, s.posto.id, url.searchParams.get("nota") || "", null);
+    return json(f ? { enviada: true, mensagem: msgNotaRepetida(f) } : { enviada: false });
+  }
 
   /* ----- fotos ----- */
   if (caminho === "/api/fotos" && metodo === "POST") {
@@ -549,7 +575,7 @@ async function api(request, env, url) {
     else if (quem === "matriz") onde.push("ator_tipo = 'matriz'");
     else if (quem === "sistema") onde.push("ator_tipo = 'sistema'");
     else if (/^[up]:\d+$/.test(quem)) { onde.push("ator_tipo = ? AND ator_id = ?"); args.push(quem[0] === "u" ? "matriz" : "posto", +quem.slice(2)); }
-    const GRUPOS = { downloads: ["baixou_foto", "baixou_nf", "baixou_alerta_foto", "baixou_alerta_nf", "baixou_zip", "gerou_excel"], alteracoes: ["posto_criado", "posto_editado", "posto_senha", "posto_desbloqueado", "usuario_criado", "usuario_editado", "usuario_senha", "usuario_desbloqueado", "alerta_visto"], acessos: ["login_matriz", "login_admin"], aberturas: ["posto_abriu_foto"], bloqueios: ["bloqueio"] };
+    const GRUPOS = { downloads: ["baixou_foto", "baixou_nf", "baixou_alerta_foto", "baixou_alerta_nf", "baixou_zip", "gerou_excel"], alteracoes: ["posto_criado", "posto_editado", "posto_senha", "posto_desbloqueado", "usuario_criado", "usuario_editado", "usuario_senha", "usuario_desbloqueado", "alerta_visto"], acessos: ["login_matriz", "login_admin"], aberturas: ["posto_abriu_foto", "nota_repetida"], bloqueios: ["bloqueio"] };
     const g = GRUPOS[q.get("tipo") || ""]; if (g) { onde.push(`acao IN (${g.map(() => "?").join(",")})`); args.push(...g); }
     if (q.get("de")) { onde.push("dia >= ?"); args.push(q.get("de").slice(0, 10)); }
     if (q.get("ate")) { onde.push("dia <= ?"); args.push(q.get("ate").slice(0, 10)); }
@@ -763,6 +789,16 @@ async function receberAlerta(request, env, posto) {
 }
 
 /* ---------- envio da foto + nota (validações no servidor) ---------- */
+/* nota única por posto: depois de um envio aceito, o mesmo número (ou a mesma chave de acesso) não entra de novo */
+async function notaJaEnviada(env, postoId, nota, chave) {
+  const n = numInt(nota);
+  if (!n && !chave) return null;
+  return await env.DB.prepare(`SELECT id, nota, capturado_txt FROM fotos WHERE posto_id = ?
+      AND ((? <> '' AND (ltrim(nota, '0') = ? OR ltrim(COALESCE(nf_numero, ''), '0') = ?)) OR (? <> '' AND nf_chave = ?))
+      ORDER BY id LIMIT 1`).bind(postoId, n, n, n, chave || "", chave || "").first();
+}
+const msgNotaRepetida = f => `A nota ${f.nota} já foi enviada em ${f.capturado_txt}. Cada nota só pode ser enviada uma vez. Se precisar corrigir, fale com a matriz.`;
+
 async function receberFoto(request, env, posto) {
   let form; try { form = await request.formData(); } catch { return erro("Envio inválido."); }
   const foto = form.get("foto"), nf = form.get("nf"), mini = form.get("mini");
@@ -774,6 +810,11 @@ async function receberFoto(request, env, posto) {
   const destDoc = soDig(m.destDoc);
   if (!cliente) return erro("Informe o cliente/motorista.");
   if (!nota || !numInt(nota)) return erro("Informe o número da nota.");
+  const repetida = await notaJaEnviada(env, posto.id, nota, null);
+  if (repetida) {
+    await registrar(env, { posto }, request, "nota_repetida", `Tentou enviar de novo a nota ${nota} (já enviada em ${repetida.capturado_txt})`, { alvo: "foto:" + repetida.id, dedupSeg: 60 });
+    return erro(msgNotaRepetida(repetida), 409, { notaRepetida: true });
+  }
   if (!(foto instanceof File) || !foto.size) return erro("A foto é obrigatória.");
   if (!(nf instanceof File) || !nf.size) return erro("O PDF da nota fiscal é obrigatório.");
   if (foto.size > MAX_FOTO) return erro("Foto grande demais.");
@@ -815,9 +856,13 @@ async function receberFoto(request, env, posto) {
     emissao = Number.isFinite(+n.emissaoMs) ? { ms: +n.emissaoMs, fonte: n.emissaoFonte || "" } : null;
   }
   if (ipCarimbo && ipCarimbo !== ip) divergencias.push(`IP no carimbo ${ipCarimbo}, IP do envio ${ip}`);
-  const ultimoLogin = await env.DB.prepare("SELECT ip FROM acessos WHERE posto_id = ? ORDER BY id DESC LIMIT 1").bind(posto.id).first();
+  const ultimoLogin = await env.DB.prepare("SELECT ip FROM acessos WHERE posto_id = ? AND criado_em >= ? ORDER BY id DESC LIMIT 1").bind(posto.id, await ipRealDesde(env)).first();
   if (ultimoLogin && ultimoLogin.ip && ultimoLogin.ip !== ip) divergencias.push(`IP do envio ${ip} diferente do IP do login ${ultimoLogin.ip}`);
 
+  if (lido && lido.chave) {
+    const mesmaChave = await notaJaEnviada(env, posto.id, "", lido.chave);
+    if (mesmaChave) return erro(msgNotaRepetida(mesmaChave), 409, { notaRepetida: true });
+  }
   if (numInt(nota) !== numeroNota) return erro(`O número da nota no PDF${lido ? ` (${numeroNota})` : ""} precisa ser igual ao número digitado.`, 422);
 
   const base = { nota, cliente, fotoEm: capBR.texto, ip, origem: "servidor" };
@@ -841,6 +886,10 @@ async function receberFoto(request, env, posto) {
   let arquivo = raiz + ".jpg", k = 2;
   while (usados.has(arquivo)) arquivo = `${raiz}_${k++}.jpg`;
   const arquivoNf = arquivo.replace(/\.jpg$/, ".pdf");
+
+  // confere de novo logo antes de gravar (dois envios ao mesmo tempo)
+  const corrida = await notaJaEnviada(env, posto.id, nota, lido && lido.chave);
+  if (corrida) return erro(msgNotaRepetida(corrida), 409, { notaRepetida: true });
 
   const id = crypto.randomUUID();
   const chaveFoto = `postos/${posto.id}/${id}.jpg`, chaveNf = `postos/${posto.id}/${id}.pdf`;
@@ -937,8 +986,9 @@ async function opcoes(env, s) {
 /* ---------- entrada ---------- */
 const BLOQUEADOS = /^\/(LEIA-ME|README|schema)\b|\.md$|\.sql$/i;
 /* Diagnóstico: /api/status (não mostra dados, só se as peças estão ligadas) */
-async function status(env) {
-  const r = { servidor: "ok", armazenamento: env.ARMAZENAMENTO || "", banco_DB: "", arquivos_FILES: "", leitor_pdf_servidor: typeof env.lerPDF === "function" && env.LeituraNF ? "ok" : "indisponível", senha_admin: env.ADMIN_PASSWORD ? "definida (ADMIN_PASSWORD)" : "padrão (admin)", hora_servidor: agoraISO() };
+async function status(env, request) {
+  const o = origemIP(request, limpaIP);
+  const r = { ip_desta_conexao: `${o.ip} (fonte: ${o.fonte})`, cabecalho_x_forwarded_for: o.xff || "(vazio)", cabecalho_x_real_ip: o.xRealIp || "(vazio)", servidor: "ok", armazenamento: env.ARMAZENAMENTO || "", banco_DB: "", arquivos_FILES: "", leitor_pdf_servidor: typeof env.lerPDF === "function" && env.LeituraNF ? "ok" : "indisponível", senha_admin: env.ADMIN_PASSWORD ? "definida (ADMIN_PASSWORD)" : "padrão (admin)", hora_servidor: agoraISO() };
   if (!env.DB || typeof env.DB.prepare !== "function") r.banco_DB = "indisponível";
   else {
     try { await preparar({ ...env, FILES: env.FILES && typeof env.FILES.put === "function" ? env.FILES : { put() {} } }); const n = await env.DB.prepare("SELECT COUNT(*) AS n FROM postos").first(); r.banco_DB = `ok (${n.n} posto(s) cadastrado(s))`; }
@@ -962,7 +1012,7 @@ export default {
           await preparar(env);
           const s = await lerSessao(request, env);
           if (!s || !s.admin) return erro("Acesso só do administrador.", 403);
-          return await status(env);
+          return await status(env, request);
         }
         return await api(request, env, url);
       } catch (e) {

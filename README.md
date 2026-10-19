@@ -45,6 +45,7 @@ Roda num único servidor Node.js, sem dependências externas. O banco é SQLite 
   - emissão até 10 minutos antes ou depois da foto.
 - **Fora do horário:** o envio é bloqueado com a mensagem "entre em contato com a matriz", e um alerta aparece no portal da matriz. Número de nota digitado errado não gera alerta.
 - **Downloads:** o posto não abre nem baixa fotos e notas já enviadas. A matriz baixa fotos, notas e .zip.
+- **Nota única:** depois de um envio aceito, o posto não consegue enviar a mesma nota de novo. Vale o mesmo número, com ou sem zeros à esquerda, ou a mesma chave de acesso. O aviso aparece já ao digitar o número. A tentativa fica no Registro de ações, e envios repetidos antigos continuam no histórico.
 - **Nome dos arquivos:** `NOTA_AAAA-MM-DD_HH-MM-SS.jpg` / `.pdf`, no horário de Brasília.
 
 ## Segurança e auditoria
@@ -60,7 +61,8 @@ Roda num único servidor Node.js, sem dependências externas. O banco é SQLite 
 - **IP:**
   - o IP do envio sai no carimbo da foto e fica gravado;
   - o posto não vê o próprio IP na tela de acesso;
-  - atrás do proxy do Railway, vale o último IP público do `X-Forwarded-For`;
+  - atrás do Railway, vale o `X-Real-IP` escrito pela borda do Railway. Se ele vier com o IP do CDN do Railway, vale o primeiro IP público do `X-Forwarded-For`. Antes da correção de 19/10/2026, o sistema gravava o IP do CDN do Railway, igual para todos. Esses registros antigos ficam no histórico, mas o farol e os alertas de IP só consideram logins a partir da correção;
+  - `/api/status` (só admin) mostra o IP detectado na conexão e os cabeçalhos recebidos, para conferência;
   - o IP é o da internet do posto, não o de cada computador.
 - **Localização do posto (opcional, por posto).**
   - No cadastro do posto: latitude, longitude e a caixa "Usa controle de localização". Postos que já existiam ficam com o controle desligado.
