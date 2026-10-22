@@ -24,10 +24,10 @@
         <img src="logo-delta.png" alt="Delta" width="342" height="194">
       </picture>
       <h1>Portal Foto Abastecimento</h1>
-      <p class="hint">Registro fotográfico de abastecimento. O acesso de cada posto é criado pela matriz.</p>
+      <p class="hint">Registro fotográfico de abastecimento. Clientes: entre com o CNPJ ou CPF da nota; no primeiro acesso, a senha é 1234.</p>
     </div>
     <form id="fEntrar" class="stack" autocomplete="off">
-      <div><label for="lUsuario">CNPJ do posto ou usuário da matriz</label><input id="lUsuario" class="mono" placeholder="00.000.000/0000-00" autocapitalize="none" autocomplete="username" required></div>
+      <div><label for="lUsuario">CNPJ do posto, CNPJ/CPF do cliente ou usuário da matriz</label><input id="lUsuario" class="mono" placeholder="00.000.000/0000-00" autocapitalize="none" autocomplete="username" required></div>
       <div><label for="lSenha">Senha</label><input id="lSenha" type="password" required></div>
       <div id="lMsg" class="msg err" hidden></div>
       <button class="primary big" type="submit" id="lBtn">Entrar</button>
@@ -122,6 +122,61 @@
 </div>
 
 <!-- ============ PORTAL DA MATRIZ ============ -->
+<!-- ============ PORTAL DO CLIENTE ============ -->
+<section id="cliente" hidden>
+  <header class="top gut">
+    <div class="top-in">
+      <div class="store"><b id="cNome">—</b><span class="mono hint" id="cDoc">—</span></div>
+      <nav class="row cl-acoes">
+        <button id="cVerTermo" hidden>Termo de uso</button>
+        <button id="cTrocarSenha" hidden>Trocar senha</button>
+      </nav>
+      <button class="sair">Sair</button>
+    </div>
+  </header>
+  <main class="admin-main gut">
+    <!-- 1º acesso, passo 1: termo LGPD -->
+    <section class="panel stack" id="cTermo" hidden>
+      <h2>Termo de aceite e LGPD</h2>
+      <p class="hint" style="margin:0" id="cTermoInfo">Para acessar as fotos e notas da sua empresa, leia e aceite o termo abaixo.</p>
+      <div class="termo-texto" id="cTermoTexto" tabindex="0"></div>
+      <div id="cTermoAceite" class="stack">
+        <label class="check"><input type="checkbox" id="cTermoOk"> Li e aceito o termo, tenho poderes para representar o titular deste CNPJ/CPF e sou responsável pelo download e pela guarda das fotos e notas da minha empresa.</label>
+        <div class="row"><button class="primary" id="cTermoAceitar" disabled>Aceito</button><button id="cTermoRecusar">Não aceito (sair)</button></div>
+      </div>
+      <div class="row" id="cTermoFechar" hidden><button id="cTermoVoltar">Voltar às fotos</button></div>
+      <div id="cTermoMsg" class="msg" hidden></div>
+    </section>
+    <!-- 1º acesso, passo 2 (ou troca): senha -->
+    <section class="panel stack" id="cSenha" hidden>
+      <h2 id="cSenhaTit">Crie a sua senha</h2>
+      <p class="hint" style="margin:0" id="cSenhaInfo">A senha padrão (1234) só vale para o primeiro acesso. Crie a sua: pode ter letras e/ou números, a partir de 4 caracteres.</p>
+      <form id="fClienteSenha" class="stack" autocomplete="off" style="max-width:420px">
+        <div id="cSenhaAtualBox" hidden><label for="cSenhaAtual">Senha atual</label><input id="cSenhaAtual" type="password" autocomplete="current-password"></div>
+        <div><label for="cSenhaNova">Nova senha</label><input id="cSenhaNova" type="password" minlength="4" maxlength="60" required autocomplete="new-password"></div>
+        <div><label for="cSenhaConf">Repita a nova senha</label><input id="cSenhaConf" type="password" minlength="4" maxlength="60" required autocomplete="new-password"></div>
+        <div class="row"><button class="primary" type="submit">Salvar senha</button><button type="button" id="cSenhaCancelar" hidden>Cancelar</button></div>
+        <div id="cSenhaMsg" class="msg" hidden></div>
+      </form>
+    </section>
+    <!-- fotos e notas do cliente -->
+    <section class="panel stack" id="cFotos" hidden>
+      <div class="row" style="justify-content:space-between"><h2>Fotos e notas dos seus abastecimentos</h2><span class="count" id="cCount"></span></div>
+      <input id="cBusca" placeholder="Buscar por nota, motorista ou posto" aria-label="Buscar">
+      <div class="filtros">
+        <div><label for="cPosto">Posto</label><select id="cPosto"><option value="">Todos</option></select></div>
+        <div><label for="cDe">Data de</label><input id="cDe" type="date"></div>
+        <div><label for="cAte">Data até</label><input id="cAte" type="date"></div>
+        <div class="fim"><button id="cLimpar">Limpar filtros</button></div>
+      </div>
+      <div class="row"><button id="cExcel" class="primary">Relatório Excel</button><button id="cZip">Baixar fotos e notas (.zip)</button><span class="hint" id="cZipInfo"></span></div>
+      <p class="hint" style="margin:0">Cada abertura e cada download ficam registrados. Na lista aparece uma miniatura borrada; use "Ver foto" para abrir a foto completa.</p>
+      <div id="cMsg" class="msg" hidden></div>
+      <div class="list grade" id="cLista"></div>
+    </section>
+  </main>
+</section>
+
 <section id="admin" hidden>
   <header class="top gut">
     <div class="top-in">
@@ -130,6 +185,7 @@
         <button role="tab" data-aba="fotos" aria-selected="true">Fotos</button>
         <button role="tab" data-aba="alertas" aria-selected="false" class="req-alertas">Alertas <span class="badge-n alerta-n" id="nAlertas" hidden>0</span></button>
         <button role="tab" data-aba="postos" aria-selected="false">Postos</button>
+        <button role="tab" data-aba="clientes" aria-selected="false">Clientes</button>
         <button role="tab" data-aba="usuarios" aria-selected="false" class="req-usuarios">Usuários</button>
         <button role="tab" data-aba="registros" aria-selected="false" class="req-admin">Registro de ações</button>
       </nav>
@@ -192,12 +248,20 @@
       <div class="list" id="psLista"></div>
     </section>
 
+    <section class="panel stack" data-painel="clientes" hidden>
+      <div class="row" style="justify-content:space-between"><h2>Acessos de clientes</h2><span class="count" id="clCount"></span></div>
+      <p class="hint" style="margin:0" id="clInfo">Cada CNPJ/CPF de cliente que aparece numa nota enviada ganha um acesso automático. No primeiro acesso, a senha é a padrão; o cliente aceita o termo LGPD e cria a própria senha. Ele vê e baixa só as fotos e notas emitidas para o CNPJ/CPF dele. Acessos não são excluídos: são desativados, para manter o histórico.</p>
+      <input id="clBusca" placeholder="Buscar cliente por nome ou CNPJ/CPF" aria-label="Buscar cliente">
+      <div id="clMsg" class="msg" hidden></div>
+      <div class="list" id="clLista"></div>
+    </section>
+
     <section class="panel stack" data-painel="registros" hidden>
       <div class="row" style="justify-content:space-between"><h2>Registro de ações</h2><span class="count" id="rgCount"></span></div>
-      <p class="hint" style="margin:0">Visível só para o administrador. Mostra o que cada usuário da matriz baixou, alterou e quando, os bloqueios por senha errada e cada vez que um posto abriu uma foto. Nada é apagado.</p>
+      <p class="hint" style="margin:0">Visível só para o administrador. Mostra o que cada usuário da matriz e cada cliente abriu, baixou e alterou, e quando; os aceites do termo LGPD; os bloqueios por senha errada; e as tentativas dos postos. Nada é apagado.</p>
       <div class="filtros">
         <div><label for="rgQuem">Quem</label><select id="rgQuem"><option value="">Todos</option></select></div>
-        <div><label for="rgTipo">Tipo de ação</label><select id="rgTipo"><option value="">Todas</option><option value="downloads">Downloads e relatórios</option><option value="alteracoes">Alterações (postos, usuários, alertas)</option><option value="acessos">Entradas na matriz</option><option value="aberturas">Fotos abertas pelos postos</option><option value="bloqueios">Bloqueios por senha errada</option></select></div>
+        <div><label for="rgTipo">Tipo de ação</label><select id="rgTipo"><option value="">Todas</option><option value="downloads">Downloads e relatórios</option><option value="alteracoes">Alterações (postos, usuários, alertas)</option><option value="acessos">Entradas na matriz</option><option value="aberturas">Fotos abertas pelos postos</option><option value="bloqueios">Bloqueios por senha errada</option><option value="clientes">Ações dos clientes (entradas, termo, senha, aberturas)</option></select></div>
         <div class="fim"><button id="rgAtualizar">Atualizar</button></div>
         <div><label for="rgDe">Data de</label><input id="rgDe" type="date"></div>
         <div><label for="rgAte">Data até</label><input id="rgAte" type="date"></div>

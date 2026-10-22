@@ -64,7 +64,7 @@ setInterval(() => { const t = brtTexto(brt(agora())); $$(".clockTxt").forEach(el
 setInterval(sincronizar, 5 * 60 * 1000);
 
 /* ---------- navegação entre telas ---------- */
-function mostrar(id){ ["#carregando","#login","#posto","#admin"].forEach(s => $(s).hidden = s !== id); }
+function mostrar(id){ ["#carregando","#login","#posto","#admin","#cliente"].forEach(s => $(s).hidden = s !== id); }
 function irLogin(msg){
   pararCamera(); limparTudo();
   $("#drawer").hidden = true; $("#viewer").hidden = true;
@@ -89,11 +89,17 @@ const linkMapa = (lat, lng) => `https://www.google.com/maps/search/?api=1&query=
 const fmtDist = m => m == null ? "" : m >= 1000 ? `${(m/1000).toFixed(1).replace(".", ",")} km` : `${m} m`;
 function aMapa(lat, lng, texto){ const a = document.createElement("a"); a.href = linkMapa(lat, lng); a.target = "_blank"; a.rel = "noopener noreferrer"; a.textContent = texto || "Ver no mapa"; return a; }
 
-$("#lUsuario").addEventListener("input", e => { const v = e.target.value; if (/^\d/.test(v)) e.target.value = maskCNPJ(v); });
+// máscara: até 11 dígitos, CPF; acima disso (ou com letras), CNPJ
+const maskCPFParcial = d => d.replace(/^(\d{3})(\d)/, "$1.$2").replace(/^(\d{3})\.(\d{3})(\d)/, "$1.$2.$3").replace(/^(\d{3})\.(\d{3})\.(\d{3})(\d)/, "$1.$2.$3-$4");
+$("#lUsuario").addEventListener("input", e => {
+  const v = e.target.value; if (!/^\d/.test(v)) return;
+  const d = soDig(v);
+  e.target.value = !/[A-Za-z]/.test(v) && d.length <= 11 ? maskCPFParcial(d) : maskCNPJ(v);
+});
 $("#fEntrar").addEventListener("submit", async e => {
   e.preventDefault();
   const usuario = $("#lUsuario").value.trim(), senha = $("#lSenha").value;
-  if (/^\d/.test(usuario) && !validCNPJ(usuario)) return showMsg($("#lMsg"), "CNPJ inválido. Confira os dígitos.");
+  if (/^\d/.test(usuario) && !validCNPJ(usuario) && !validCPF(soDig(usuario))) return showMsg($("#lMsg"), "CNPJ ou CPF inválido. Confira os dígitos.");
   $("#lBtn").disabled = true;
   try {
     try { await api("/api/login", { method:"POST", body:{ usuario, senha } }); }
@@ -115,7 +121,9 @@ async function iniciar(){
   try { me = await api("/api/me", { silencioso: true }); } catch (e) { if (e.status !== 401) { mostrar("#login"); showMsg($("#lMsg"), e.message); } return; }
   if (!me || !me.papel){ mostrar("#login"); return showMsg($("#lMsg"), "O sistema está indisponível no momento. Tente de novo em instantes."); }
   await sincronizar();
-  if (me.papel === "posto") entrarPosto(me.posto); else entrarAdmin(me);
+  if (me.papel === "posto") entrarPosto(me.posto);
+  else if (me.papel === "cliente") entrarCliente(me);
+  else entrarAdmin(me);
 }
 
 /* =====================================================================
@@ -545,8 +553,8 @@ function entrarAdmin(me){
   meusPoderes = me.perms || {};
   const b = document.body.classList;
   b.toggle("nao-admin", !ehAdmin);
-  ["baixar","alertas","postos","usuarios"].forEach(p => b.toggle("sem-" + p, !tenho(p)));
-  const lista = { baixar:"baixar", alertas:"alertas", postos:"postos", usuarios:"usuários" };
+  ["baixar","alertas","postos","usuarios","clientes"].forEach(p => b.toggle("sem-" + p, !tenho(p)));
+  const lista = { baixar:"baixar", alertas:"alertas", postos:"postos", usuarios:"usuários", clientes:"clientes" };
   const tem = Object.keys(lista).filter(tenho).map(k => lista[k]);
   $("#aQuem").textContent = ehAdmin ? "Administrador" : `${me.nome || ""} · ${tem.length ? "pode: " + tem.join(", ") : "somente visualizar"}`;
   $("#avisoSenha").hidden = !me.senhaPadrao;
@@ -561,6 +569,7 @@ function abrirAba(aba){
   $$("[data-painel]").forEach(p => p.hidden = p.dataset.painel !== aba);
   if (aba === "alertas") listarAlertas();
   if (aba === "postos") listarPostos();
+  if (aba === "clientes") listarClientes();
   if (aba === "usuarios") listarUsuarios();
   if (aba === "registros") listarRegistros();
   if (aba === "fotos") carregarOpcoesAdmin();
@@ -823,7 +832,7 @@ function montaPosto(p, podeAlterar){
 }
 
 /* ----- usuários da matriz e seus poderes ----- */
-const NOMES_PODERES = { baixar: "Baixar fotos, notas e relatórios", alertas: "Ver alertas e farol de IP", postos: "Alterar postos", usuarios: "Alterar usuários da matriz" };
+const NOMES_PODERES = { baixar: "Baixar fotos, notas e relatórios", alertas: "Ver alertas e farol de IP", postos: "Alterar postos", usuarios: "Alterar usuários da matriz", clientes: "Alterar acessos de clientes" };
 function caixasPoderes(alvo, marcados, desabilitar){
   alvo.innerHTML = "";
   Object.keys(NOMES_PODERES).forEach(k => {
@@ -899,7 +908,7 @@ async function listarRegistros(){
   [["quem","#rgQuem"],["tipo","#rgTipo"],["de","#rgDe"],["ate","#rgAte"]].forEach(([k,s]) => { const v = $(s).value; if (v) q.set(k, v); });
   try {
     const r = await api("/api/registros?" + q);
-    const opc = [["admin","Administrador"],["matriz","Todos os usuários da matriz"],...r.usuarios.map(u => ["u:" + u.id, `Matriz · ${u.nome} (${u.usuario})`]),["postos","Todos os postos"],...r.postos.map(p => ["p:" + p.id, `Posto · ${p.nome}`]),["sistema","Sistema (bloqueios)"]];
+    const opc = [["admin","Administrador"],["matriz","Todos os usuários da matriz"],...r.usuarios.map(u => ["u:" + u.id, `Matriz · ${u.nome} (${u.usuario})`]),["postos","Todos os postos"],...r.postos.map(p => ["p:" + p.id, `Posto · ${p.nome}`]),["clientes","Todos os clientes"],...(r.clientes || []).map(c => ["c:" + c.id, `Cliente · ${c.nome} (${c.doc_fmt})`]),["sistema","Sistema (bloqueios)"]];
     preencheSelect($("#rgQuem"), opc);
     $("#rgCount").textContent = r.total === r.registros.length ? `${r.total} registro(s)` : `${r.registros.length} de ${r.total} registros (os mais recentes)`;
     lista.innerHTML = "";
@@ -917,6 +926,222 @@ async function listarRegistros(){
 }
 ["#rgQuem","#rgTipo","#rgDe","#rgAte"].forEach(s => $(s).addEventListener("change", listarRegistros));
 $("#rgAtualizar").onclick = listarRegistros;
+
+/* =====================================================================
+   PORTAL DO CLIENTE (CNPJ/CPF das notas) — só as fotos e notas emitidas para ele
+   ===================================================================== */
+let cliente = null, termoVersao = "", ultimaListaCliente = [];
+function painelCliente(id){
+  ["#cTermo","#cSenha","#cFotos"].forEach(s => $(s).hidden = s !== id);
+  $("#cVerTermo").hidden = $("#cTrocarSenha").hidden = id !== "#cFotos";
+}
+function entrarCliente(me){
+  posto = null; cliente = me.cliente;
+  $("#cNome").textContent = cliente.nome;
+  $("#cDoc").textContent = (cliente.tipo === "PF" ? "CPF " : "CNPJ ") + cliente.doc_fmt;
+  mostrar("#cliente");
+  if (me.pendente.termo) return passoTermo(true);
+  if (me.pendente.senha) return passoSenha(true);
+  abrirFotosCliente();
+}
+async function passoTermo(obrigatorio){
+  painelCliente("#cTermo"); showMsg($("#cTermoMsg"), "");
+  $("#cTermoAceite").hidden = !obrigatorio; $("#cTermoFechar").hidden = obrigatorio;
+  $("#cTermoOk").checked = false; $("#cTermoAceitar").disabled = true;
+  $("#cTermoInfo").textContent = obrigatorio
+    ? "Primeiro acesso: para ver e baixar as fotos e notas da sua empresa, leia e aceite o termo abaixo. Depois você cria a sua senha."
+    : "Termo já aceito. O texto abaixo é a versão em vigor.";
+  try { const t = await api("/api/cliente/termo"); termoVersao = t.versao; $("#cTermoTexto").textContent = t.texto; $("#cTermoTexto").scrollTop = 0; }
+  catch (e) { showMsg($("#cTermoMsg"), e.message); }
+}
+$("#cTermoOk").onchange = () => { $("#cTermoAceitar").disabled = !$("#cTermoOk").checked; };
+$("#cTermoAceitar").onclick = async () => {
+  $("#cTermoAceitar").disabled = true;
+  try {
+    await api("/api/cliente/termo", { method:"POST", body:{ aceito: true, versao: termoVersao } });
+    const me = await api("/api/me");
+    if (me.pendente.senha) passoSenha(true); else abrirFotosCliente();
+  } catch (e) { showMsg($("#cTermoMsg"), e.message); $("#cTermoAceitar").disabled = !$("#cTermoOk").checked; }
+};
+$("#cTermoRecusar").onclick = async () => { try { await api("/api/logout", { method:"POST" }); } catch {} irLogin("Sem o aceite do termo, o acesso às fotos e notas não é liberado."); };
+$("#cTermoVoltar").onclick = () => abrirFotosCliente();
+$("#cVerTermo").onclick = () => passoTermo(false);
+let senhaPrimeiroAcesso = false;
+function passoSenha(primeiro){
+  senhaPrimeiroAcesso = primeiro;
+  painelCliente("#cSenha"); showMsg($("#cSenhaMsg"), "");
+  ["#cSenhaAtual","#cSenhaNova","#cSenhaConf"].forEach(s => $(s).value = "");
+  $("#cSenhaAtualBox").hidden = primeiro; $("#cSenhaCancelar").hidden = primeiro;
+  $("#cSenhaTit").textContent = primeiro ? "Crie a sua senha" : "Trocar senha";
+  $("#cSenhaInfo").textContent = primeiro
+    ? "A senha padrão (1234) só vale para o primeiro acesso. Crie a sua: pode ter letras e/ou números, a partir de 4 caracteres."
+    : "Informe a senha atual e a nova. Pode ter letras e/ou números, a partir de 4 caracteres.";
+  (primeiro ? $("#cSenhaNova") : $("#cSenhaAtual")).focus();
+}
+$("#cTrocarSenha").onclick = () => passoSenha(false);
+$("#cSenhaCancelar").onclick = () => abrirFotosCliente();
+$("#fClienteSenha").addEventListener("submit", async e => {
+  e.preventDefault();
+  const nova = $("#cSenhaNova").value, conf = $("#cSenhaConf").value;
+  if (nova !== conf) return showMsg($("#cSenhaMsg"), "As duas senhas não são iguais.");
+  if (nova.length < 4) return showMsg($("#cSenhaMsg"), "A senha precisa ter pelo menos 4 caracteres.");
+  if (nova === "1234") return showMsg($("#cSenhaMsg"), "A nova senha não pode ser a senha padrão (1234).");
+  try {
+    await api("/api/cliente/senha", { method:"POST", body:{ nova, atual: $("#cSenhaAtual").value } });
+    await abrirFotosCliente();
+    showMsg($("#cMsg"), senhaPrimeiroAcesso ? "Senha criada. Use-a nos próximos acessos." : "Senha alterada.", "ok");
+  } catch (err) { showMsg($("#cSenhaMsg"), err.message); }
+});
+
+async function abrirFotosCliente(){
+  painelCliente("#cFotos");
+  try { const o = await api("/api/opcoes"); preencheSelect($("#cPosto"), o.postos.map(p => [p.id, `${p.nome} · ${maskCNPJ(p.cnpj)}`])); } catch {}
+  await listarCliente();
+}
+function filtrosCliente(){
+  const q = new URLSearchParams();
+  [["q","#cBusca"],["posto","#cPosto"],["de","#cDe"],["ate","#cAte"]].forEach(([k,s]) => { const v = $(s).value.trim(); if (v) q.set(k, v); });
+  return q;
+}
+function montaItemCliente(f){
+  const el = document.createElement("div"); el.className = "item";
+  el.innerHTML = `${f.tem_mini ? `<img class="mini-borrada" alt="Miniatura borrada" loading="lazy" draggable="false">` : `<div class="foto-ph" aria-hidden="true"><span>FOTO</span></div>`}
+    <div style="min-width:0"><div class="cli"></div><div class="when"></div><div class="meta"></div><div class="meta seg"></div>
+    <div class="row"><button data-a="ver">Ver foto</button></div></div>`;
+  if (f.tem_mini) el.querySelector("img").src = `/api/fotos/${f.id}/mini`;
+  el.querySelector(".cli").textContent = `Nota ${f.nota} · ${f.posto_nome || "Posto"}`;
+  el.querySelector(".when").textContent = f.capturado_txt;
+  el.querySelector(".meta").textContent = [`Motorista: ${f.cliente}`, f.nf_modelo ? `${f.nf_modelo}${f.nf_serie ? " série " + f.nf_serie : ""}` : "", f.nf_emissao ? `horário da nota ${f.nf_emissao}` : ""].filter(Boolean).join(" · ");
+  const seg = el.querySelector(".seg");
+  if (f.hash_foto){ seg.textContent = `hash ${curto(f.hash_foto)}`; seg.title = `Hash SHA-256 da foto: ${f.hash_foto}` + (f.hash_nf ? `\nHash SHA-256 da NF: ${f.hash_nf}` : ""); } else seg.remove();
+  const src = `/api/fotos/${f.id}/foto`;
+  el.querySelector('[data-a="ver"]').onclick = () => abrirViewer(src, f.arquivo, f.hash_foto, false);
+  const row = el.querySelector(".row");
+  const a1 = document.createElement("a"); a1.className = "btn"; a1.href = src + "?download=1"; a1.textContent = "Baixar foto"; row.appendChild(a1);
+  const a2 = document.createElement("a"); a2.className = "btn"; a2.href = `/api/fotos/${f.id}/nf`; a2.textContent = "Baixar NF"; row.appendChild(a2);
+  return el;
+}
+async function listarCliente(){
+  const de = $("#cDe").value, ate = $("#cAte").value;
+  if (de && ate && de > ate) showMsg($("#cMsg"), "A data inicial é depois da data final."); else showMsg($("#cMsg"), "");
+  const q = filtrosCliente(); q.set("limite", "500");
+  const lista = $("#cLista");
+  try {
+    const r = await api("/api/fotos?" + q);
+    ultimaListaCliente = r.fotos;
+    $("#cCount").textContent = (r.total === r.geral ? `${r.geral} registro(s)` : `${r.total} de ${r.geral} registros`) + (r.fotos.length < r.total ? ` (mostrando os ${r.fotos.length} mais recentes)` : "");
+    $("#cZip").disabled = !r.fotos.length; $("#cExcel").disabled = !r.total;
+    $("#cZipInfo").textContent = r.fotos.length ? `${r.fotos.length} fotos e ${r.fotos.length} notas no .zip` : "";
+    lista.innerHTML = "";
+    if (!r.fotos.length){ lista.innerHTML = `<div class="empty">${r.geral ? "Nenhum registro com esses filtros." : "Ainda não há fotos de abastecimento para este CNPJ/CPF."}</div>`; return; }
+    r.fotos.forEach(f => lista.appendChild(montaItemCliente(f)));
+  } catch (e) { showMsg($("#cMsg"), e.message); }
+}
+$("#cBusca").addEventListener("input", debounce(listarCliente));
+["#cPosto","#cDe","#cAte"].forEach(s => $(s).addEventListener("change", listarCliente));
+$("#cLimpar").onclick = () => { ["#cBusca","#cPosto","#cDe","#cAte"].forEach(s => $(s).value = ""); listarCliente(); };
+$("#cZip").onclick = async () => {
+  const fotos = ultimaListaCliente;
+  if (!fotos.length) return;
+  if (!window.JSZip) return showMsg($("#cMsg"), "Não foi possível montar o .zip agora. Recarregue a página.");
+  const btn = $("#cZip"); btn.disabled = true;
+  const lote = Date.now().toString(36) + Math.random().toString(36).slice(2, 8); // um único registro no histórico
+  try {
+    const z = new JSZip();
+    for (let i = 0; i < fotos.length; i++){
+      const f = fotos[i];
+      showMsg($("#cMsg"), `Montando o .zip: ${i+1} de ${fotos.length}…`, "ok");
+      const pasta = `${(f.posto_nome || "posto").replace(/[\\/:*?"<>|]+/g,"-")}/`;
+      const [rf, rn] = await Promise.all([fetch(`/api/fotos/${f.id}/foto?download=1&lote=${lote}`, { credentials:"same-origin" }), fetch(`/api/fotos/${f.id}/nf?lote=${lote}`, { credentials:"same-origin" })]);
+      if (rf.ok) z.file(pasta + f.arquivo, await rf.blob());
+      if (rn.ok) z.file(pasta + f.arquivo_nf, await rn.blob());
+    }
+    baixarBlob(await z.generateAsync({ type:"blob" }), `fotos_${soDig(cliente.doc)}_${carimboArquivo()}.zip`);
+    showMsg($("#cMsg"), "Arquivo .zip gerado.", "ok");
+  } catch (e) { showMsg($("#cMsg"), "Não foi possível gerar o .zip agora. Tente de novo."); }
+  finally { btn.disabled = false; }
+};
+$("#cExcel").onclick = async () => {
+  if (!window.XLSX) return showMsg($("#cMsg"), "O gerador de Excel não carregou. Recarregue a página.");
+  const btn = $("#cExcel"); btn.disabled = true; showMsg($("#cMsg"), "Gerando o relatório…", "ok");
+  try {
+    const q = filtrosCliente(); q.set("relatorio", "1"); q.set("limite", "20000");
+    const r = await api("/api/fotos?" + q);
+    const linhas = r.fotos.map(f => ({
+      "Data/hora da foto (Brasília)": f.capturado_txt, "Posto": f.posto_nome || "", "CNPJ do posto": maskCNPJ(f.posto_cnpj || ""),
+      "Nota": f.nota, "Série": f.nf_serie || "", "Modelo": f.nf_modelo || "", "Horário da nota": f.nf_emissao || "",
+      "Motorista informado": f.cliente, "Cliente da nota": f.dest_nome || "", "CNPJ/CPF do cliente": fmtDoc(f.dest_doc || ""),
+      "Chave de acesso": f.nf_chave || "", "CNPJ emitente": maskCNPJ(f.nf_cnpj_emit || ""),
+      "Hash SHA-256 da foto": f.hash_foto || "", "Hash SHA-256 da NF": f.hash_nf || "",
+      "Arquivo da foto": f.arquivo, "Arquivo da NF": f.arquivo_nf
+    }));
+    const ws = XLSX.utils.json_to_sheet(linhas);
+    ws["!cols"] = Object.keys(linhas[0] || {}).map(k => ({ wch: Math.min(60, Math.max(12, k.length + 2)) }));
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Abastecimentos");
+    const out = XLSX.write(wb, { bookType:"xlsx", type:"array" });
+    baixarBlob(new Blob([out], { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), `abastecimentos_${soDig(cliente.doc)}_${carimboArquivo()}.xlsx`);
+    showMsg($("#cMsg"), `Relatório gerado com ${linhas.length} registro(s).`, "ok");
+  } catch (e) { showMsg($("#cMsg"), e.message || "Não foi possível gerar o relatório agora."); }
+  finally { btn.disabled = false; }
+};
+
+/* ----- matriz: acessos de clientes ----- */
+async function listarClientes(){
+  const box = $("#clLista");
+  try {
+    const r = await api("/api/clientes?q=" + encodeURIComponent($("#clBusca").value.trim()));
+    $("#clCount").textContent = r.clientes.length < r.total ? `${r.clientes.length} de ${r.total} clientes` : `${r.total} cliente(s)`;
+    box.innerHTML = "";
+    if (!r.clientes.length){ box.innerHTML = `<div class="empty">${$("#clBusca").value ? "Nenhum cliente com essa busca." : "Nenhum cliente ainda. Os acessos são criados sozinhos quando chegam notas com CNPJ/CPF do cliente."}</div>`; return; }
+    r.clientes.forEach(c => box.appendChild(montaCliente(c, r.podeAlterar, r.senhaPadrao)));
+  } catch (e) { box.innerHTML = ""; alertaErro(box, e.message); }
+}
+$("#clBusca").addEventListener("input", debounce(listarClientes));
+function montaCliente(c, podeAlterar, senhaPadrao){
+  const el = document.createElement("div"); el.className = "posto" + (c.ativo ? "" : " inativo");
+  el.innerHTML = `
+    <div class="row" style="justify-content:space-between"><div style="min-width:0"><b class="pn"></b> <span class="chips"></span><div class="mono hint pc"></div><div class="hint st"></div><div class="bloq" hidden></div></div>
+      <div class="row"><button data-a="desbloquear" hidden>Desbloquear</button><button data-a="editar">Editar</button></div></div>
+    <div class="stack ed" hidden>
+      <div class="fields"><div><label>Nome do cliente</label><input class="e-nome" maxlength="100"></div>
+        <div style="align-self:end"><label class="check"><input type="checkbox" class="e-ativo"> Acesso ativo</label></div></div>
+      <div class="row"><button class="primary" data-a="salvar">Salvar</button><button data-a="cancelar">Cancelar</button></div>
+    </div>
+    <div class="row l-senha"><button data-a="padrao"></button><input type="text" placeholder="Senha provisória" aria-label="Senha provisória" autocomplete="off" class="e-senha"><button data-a="senha">Definir senha provisória</button></div>
+    <div class="msg" hidden></div>`;
+  el.querySelector(".pn").textContent = c.nome;
+  const chips = el.querySelector(".chips");
+  const chip = (t, cls) => { const x = document.createElement("span"); x.className = "chip " + (cls || ""); x.textContent = t; chips.appendChild(x); };
+  if (!c.ativo) chip("Acesso desativado", "erro");
+  if (c.termo_ok) chip("Termo aceito"); else chip("Termo pendente", "neutro");
+  el.querySelector(".pc").textContent = `${c.tipo === "PF" ? "CPF" : "CNPJ"} ${c.doc_fmt} · ${c.fotos} ${c.fotos === 1 ? "foto" : "fotos"}` + (c.ultima_foto_txt ? ` · última ${c.ultima_foto_txt}` : "")
+    + (c.ultimo_acesso_txt ? ` · último acesso ${c.ultimo_acesso_txt}` : " · ainda não entrou");
+  const senhaTxt = !c.trocar_senha ? "senha criada pelo cliente"
+    : c.senha_padrao ? `aguardando o primeiro acesso com a senha padrão (${senhaPadrao})` : "senha provisória definida pela matriz (o cliente cria a dele no próximo acesso)";
+  const termoTxt = c.termo_ok ? `termo LGPD v${c.termo_versao} aceito em ${c.termo_aceito_txt}${c.termo_ip ? " (IP " + c.termo_ip + ")" : ""}`
+    : c.termo_versao ? `aceitou a versão ${c.termo_versao} do termo; aceitará a atual no próximo acesso` : "termo LGPD ainda não aceito";
+  el.querySelector(".st").textContent = `Senha: ${senhaTxt} · ${termoTxt}` + (c.nome_editado ? " · nome ajustado pela matriz" : "");
+  if (c.bloqueado_ate_txt){ const b = el.querySelector(".bloq"); b.hidden = false; b.textContent = `Bloqueado por senhas erradas até ${c.bloqueado_ate_txt}`; }
+  if (!podeAlterar){ el.querySelector('[data-a="editar"]').remove(); el.querySelector('[data-a="desbloquear"]').remove(); el.querySelector(".l-senha").remove(); return el; }
+  const msg = el.querySelector(".msg"), ed = el.querySelector(".ed"), iN = el.querySelector(".e-nome"), iA = el.querySelector(".e-ativo");
+  const acao = async (url, body, ok) => { try { await api(url, { method:"PUT", body }); if (ok) { await listarClientes(); } } catch (e) { showMsg(msg, e.message); throw e; } };
+  const bD = el.querySelector('[data-a="desbloquear"]'); bD.hidden = !c.bloqueado_ate_txt;
+  bD.onclick = () => acao(`/api/clientes/${c.id}/desbloquear`, {}, true).catch(() => {});
+  el.querySelector('[data-a="editar"]').onclick = () => { iN.value = c.nome; iA.checked = !!c.ativo; ed.hidden = false; showMsg(msg, ""); };
+  el.querySelector('[data-a="cancelar"]').onclick = () => { ed.hidden = true; };
+  el.querySelector('[data-a="salvar"]').onclick = () => acao(`/api/clientes/${c.id}`, { nome: iN.value, ativo: iA.checked }, true).catch(() => {});
+  const bP = el.querySelector('[data-a="padrao"]'); bP.textContent = `Voltar à senha padrão (${senhaPadrao})`;
+  bP.onclick = async () => {
+    if (!confirm(`Voltar ${c.nome} para a senha padrão (${senhaPadrao})? A senha atual deixa de valer e o cliente cria uma nova no próximo acesso.`)) return;
+    try { await acao(`/api/clientes/${c.id}/senha`, {}, false); showMsg(msg, `Senha voltou para a padrão (${senhaPadrao}). O cliente cria uma nova no próximo acesso.`, "ok"); } catch {}
+  };
+  el.querySelector('[data-a="senha"]').onclick = async () => {
+    const s = el.querySelector(".e-senha");
+    if (s.value.length < 4) return showMsg(msg, "A senha precisa ter pelo menos 4 caracteres.");
+    try { await acao(`/api/clientes/${c.id}/senha`, { senha: s.value }, false); s.value = ""; showMsg(msg, "Senha provisória definida. O cliente entra com ela e cria a própria senha.", "ok"); } catch {}
+  };
+  return el;
+}
 
 /* ---------- início ---------- */
 iniciar();

@@ -114,6 +114,29 @@ Roda num único servidor Node.js, sem dependências externas. O banco é SQLite 
 - **Erros sem detalhes técnicos.** O usuário vê uma mensagem simples com um código. O detalhe fica só no log do servidor, com o mesmo código. `/api/status` só abre para o admin logado.
 - **Nada é apagado:** a atualização do banco só acrescenta colunas e tabelas.
 
+## Acesso do cliente
+
+- **Criação automática:** cada CNPJ ou CPF válido de cliente que aparece numa nota enviada ganha um acesso. Isso vale também para as notas enviadas antes desta versão, que são incluídas quando o servidor inicia. Nota sem documento ("consumidor não identificado") não gera acesso.
+- **Login:** pelo mesmo portal, com o CNPJ ou CPF e a senha padrão `1234` no primeiro acesso. Se um CNPJ for ao mesmo tempo posto e cliente, a senha decide qual acesso abre. O posto tem prioridade.
+- **Primeiro acesso:**
+  1. o cliente lê e aceita o termo de aceite e LGPD (`termo-cliente.mjs`). O aceite fica guardado com versão, hash do texto, data, hora, IP e navegador;
+  2. o cliente cria a própria senha: letras e/ou números, a partir de 4 caracteres, diferente de `1234`.
+  Antes disso, ele não vê nada.
+- **O que o cliente vê:**
+  - só as fotos e notas emitidas para o CNPJ/CPF dele, de todos os postos;
+  - a lista mostra a miniatura borrada, e a foto inteira abre em "Ver foto";
+  - pode baixar foto, NF, .zip e relatório Excel;
+  - não vê IP, localização, divergências nem alertas, que são controles da matriz.
+- **Histórico:** cada entrada, aceite do termo, troca de senha, abertura de foto, download, .zip e Excel do cliente vai para o Registro de ações, com data, hora e IP.
+- **Gestão pela matriz (aba Clientes):** toda a matriz vê a lista. Com o poder "Alterar acessos de clientes", também pode:
+  - ajustar o nome (notas novas não sobrescrevem um nome ajustado);
+  - desativar ou reativar o acesso;
+  - voltar o cliente para a senha padrão;
+  - definir uma senha provisória;
+  - desbloquear.
+  Acessos não são excluídos, para manter o histórico.
+- **Mudar o termo:** edite `termo-cliente.mjs` e aumente `TERMO_VERSAO`. Todos os clientes aceitam a nova versão no acesso seguinte.
+
 ## Rodar no computador (teste)
 
 Precisa de Node.js 22.13 ou mais novo.

@@ -175,3 +175,8 @@ body.nao-admin .req-admin, body.sem-baixar .req-baixar, body.sem-alertas .req-al
 .ok-caixa .hint{margin:0;overflow-wrap:anywhere}
 .ok-caixa #okConta{margin:0;font-weight:600}
 .ok-sinal{width:56px;height:56px;border-radius:50%;background:var(--ok);color:#fff;display:grid;place-items:center;font:700 1.8rem var(--body)}
+/* portal do cliente */
+.termo-texto{white-space:pre-wrap;max-height:52vh;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:14px 16px;background:var(--bg);font:400 .9rem/1.5 var(--body);color:var(--fg)}
+.cl-acoes{gap:8px}
+.posto.inativo{opacity:.7}
+.posto .chips .chip:first-child{margin-left:4px}

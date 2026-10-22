@@ -10,7 +10,9 @@
 
 const LIMITE_NOTA_MIN = 10;      // diferença máxima entre o horário da nota e a foto
 const LIMITE_ENVIO_MIN = 20;     // diferença máxima entre a foto e a chegada no servidor
+import { TERMO_VERSAO, TERMO_TEXTO } from "./termo-cliente.mjs";
 const MAX_FOTO = 8 * 1024 * 1024;
+const SENHA_PADRAO_CLIENTE = "1234";   // senha do primeiro acesso do cliente (troca obrigatória)
 const MAX_PDF = 10 * 1024 * 1024;
 const MAX_MINI = 80 * 1024;
 const RAIO_LOCAL_M = 500;         // distância do local cadastrado do posto que gera alerta
@@ -135,7 +137,7 @@ const COLUNAS_NOVAS = {
   postos: { lat: "REAL", lng: "REAL", usa_local: "INTEGER NOT NULL DEFAULT 0" },
   acessos: { lat: "REAL", lng: "REAL", precisao: "REAL", dist_m: "REAL" },
   // usuários que já existiam (antigo "consulta") mantêm o que já faziam: baixar e ver alertas
-  usuarios: { perm_baixar: "INTEGER NOT NULL DEFAULT 1", perm_alertas: "INTEGER NOT NULL DEFAULT 1", perm_postos: "INTEGER NOT NULL DEFAULT 0", perm_usuarios: "INTEGER NOT NULL DEFAULT 0" }
+  usuarios: { perm_baixar: "INTEGER NOT NULL DEFAULT 1", perm_alertas: "INTEGER NOT NULL DEFAULT 1", perm_postos: "INTEGER NOT NULL DEFAULT 0", perm_usuarios: "INTEGER NOT NULL DEFAULT 0", perm_clientes: "INTEGER NOT NULL DEFAULT 0" }
 };
 function preparar(env) {
   if (!env.DB || typeof env.DB.prepare !== "function") throw new Error("Banco (DB) indisponível.");
@@ -175,7 +177,17 @@ function preparar(env) {
           id INTEGER PRIMARY KEY AUTOINCREMENT, criado_em TEXT NOT NULL, dia TEXT NOT NULL, ator_tipo TEXT NOT NULL, ator_id INTEGER,
           ator_nome TEXT, acao TEXT NOT NULL, descricao TEXT, alvo TEXT, ip TEXT, lote TEXT, qtd INTEGER NOT NULL DEFAULT 1)`),
         env.DB.prepare(`CREATE INDEX IF NOT EXISTS ix_registros ON registros(ator_tipo, ator_id, id)`),
-        env.DB.prepare(`CREATE INDEX IF NOT EXISTS ix_registros_dia ON registros(dia)`)
+        env.DB.prepare(`CREATE INDEX IF NOT EXISTS ix_registros_dia ON registros(dia)`),
+        // clientes: criados sozinhos a partir do CNPJ/CPF do cliente das notas enviadas
+        env.DB.prepare(`CREATE TABLE IF NOT EXISTS clientes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, doc TEXT NOT NULL UNIQUE, tipo TEXT, nome TEXT NOT NULL,
+          senha_hash TEXT, salt TEXT NOT NULL, trocar_senha INTEGER NOT NULL DEFAULT 1, ativo INTEGER NOT NULL DEFAULT 1,
+          nome_editado INTEGER NOT NULL DEFAULT 0, termo_versao TEXT, termo_aceito_em TEXT, termo_ip TEXT,
+          criado_em TEXT NOT NULL, atualizado_em TEXT, ultimo_acesso TEXT)`),
+        env.DB.prepare(`CREATE TABLE IF NOT EXISTS termos_aceite (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, cliente_id INTEGER NOT NULL, versao TEXT NOT NULL, texto_hash TEXT NOT NULL,
+          aceito_em TEXT NOT NULL, ip TEXT, navegador TEXT)`),
+        env.DB.prepare(`CREATE INDEX IF NOT EXISTS ix_fotos_dest ON fotos(dest_doc)`)
       ]);
       // colunas novas em tabelas que já existem: ADD COLUMN preserva todos os registros
       for (const [tabela, cols] of Object.entries(COLUNAS_NOVAS)) {
@@ -184,6 +196,7 @@ function preparar(env) {
       }
       await env.DB.prepare(`CREATE INDEX IF NOT EXISTS ix_fotos_ip ON fotos(posto_id, id)`).run();
       await ipRealDesde(env);
+      await sincronizarClientes(env);
     })().catch(e => { preparo = null; throw e; });
   }
   return preparo;
@@ -225,7 +238,8 @@ const PODERES = {
   baixar: "Baixar fotos, notas e relatórios",
   alertas: "Ver alertas e farol de IP",
   postos: "Alterar postos (cadastrar, editar, senha, desbloquear)",
-  usuarios: "Alterar usuários da matriz"
+  usuarios: "Alterar usuários da matriz",
+  clientes: "Alterar acessos de clientes (nome, senha, bloqueio)"
 };
 const TODOS_PODERES = Object.fromEntries(Object.keys(PODERES).map(k => [k, true]));
 const poderesDe = u => Object.fromEntries(Object.keys(PODERES).map(k => [k, !!u["perm_" + k]]));
@@ -244,6 +258,13 @@ async function lerSessao(request, env) {
     if (!u || !u.ativo || !iguais(u.salt.slice(0, 12), d.s || "")) return null;
     return { matriz: true, papel: "matriz", uid: u.id, nome: u.nome, usuario: u.usuario, perms: poderesDe(u) };
   }
+  if (d.r === "cliente") {
+    const c = await env.DB.prepare("SELECT * FROM clientes WHERE id = ?").bind(d.cid).first();
+    // senha trocada (pelo cliente ou pela matriz) ou acesso desativado derrubam as sessões antigas
+    if (!c || !c.ativo || !iguais(c.salt.slice(0, 12), d.s || "")) return null;
+    return { cliente: { id: c.id, doc: c.doc, nome: c.nome, tipo: c.tipo }, papel: "cliente",
+      pendente: { termo: c.termo_versao !== TERMO_VERSAO, senha: !!c.trocar_senha } };
+  }
   if (d.r === "posto") {
     const p = await env.DB.prepare("SELECT id, cnpj, nome, salt, lat, lng, usa_local FROM postos WHERE id = ?").bind(d.pid).first();
     // senha alterada pela matriz derruba as sessões antigas
@@ -258,6 +279,7 @@ function ator(s) {
   if (!s) return { tipo: "sistema", id: null, nome: "Sistema" };
   if (s.admin) return { tipo: "admin", id: null, nome: "Administrador (admin)" };
   if (s.posto) return { tipo: "posto", id: s.posto.id, nome: `${s.posto.nome} (${s.posto.cnpj})` };
+  if (s.cliente) return { tipo: "cliente", id: s.cliente.id, nome: `${s.cliente.nome} (${fmtDocTxt(s.cliente.doc)})` };
   return { tipo: "matriz", id: s.uid, nome: `${s.nome} (${s.usuario})` };
 }
 async function registrar(env, s, request, acao, descricao, extra = {}) {
@@ -283,7 +305,10 @@ const ACOES = {
   posto_criado: "Cadastrou posto", posto_editado: "Editou posto", posto_senha: "Trocou senha de posto", posto_desbloqueado: "Desbloqueou posto",
   usuario_criado: "Criou usuário da matriz", usuario_editado: "Alterou usuário da matriz", usuario_senha: "Trocou senha de usuário da matriz", usuario_desbloqueado: "Desbloqueou usuário da matriz",
   alerta_visto: "Marcou alerta como visto", bloqueio: "Bloqueio por senhas erradas", posto_abriu_foto: "Posto abriu foto",
-  nota_repetida: "Posto tentou repetir nota"
+  nota_repetida: "Posto tentou repetir nota",
+  login_cliente: "Cliente entrou no portal", termo_aceito: "Cliente aceitou o termo LGPD", cliente_trocou_senha: "Cliente criou/trocou a própria senha",
+  cliente_abriu_foto: "Cliente abriu foto",
+  cliente_editado: "Alterou acesso de cliente", cliente_senha: "Redefiniu senha de cliente", cliente_desbloqueado: "Desbloqueou cliente"
 };
 
 /* ---------- bloqueio após tentativas erradas ---------- */
@@ -430,11 +455,15 @@ async function api(request, env, url) {
       const usr = await env.DB.prepare("SELECT * FROM usuarios WHERE usuario = ?").bind(u.toLowerCase()).first();
       if (usr) conta = { tipo: "matriz", chave: "u:" + usr.id, nome: `Usuário da matriz ${usr.nome} (${usr.usuario})`, usr };
       else {
-        const cnpj = normCNPJ(u);
-        if (!validCNPJ(cnpj)) return erro("Usuário ou senha incorretos.", 401);
-        const p = await env.DB.prepare("SELECT * FROM postos WHERE cnpj = ?").bind(cnpj).first();
-        if (!p) return erro("CNPJ ou senha incorretos. Se esqueceu a senha, fale com a matriz.", 401);
-        conta = { tipo: "posto", chave: "p:" + p.id, nome: `Posto ${p.nome} (${p.cnpj})`, postoId: p.id, p };
+        // CNPJ: posto ou cliente; CPF: cliente
+        const cnpj = normCNPJ(u), dig = soDig(u);
+        const p = validCNPJ(cnpj) ? await env.DB.prepare("SELECT * FROM postos WHERE cnpj = ?").bind(cnpj).first() : null;
+        const cli = docClienteValido(dig) ? await env.DB.prepare("SELECT * FROM clientes WHERE doc = ?").bind(dig).first() : null;
+        const contaCli = cli ? { tipo: "cliente", chave: "c:" + cli.id, nome: `Cliente ${cli.nome} (${fmtDocTxt(cli.doc)})`, cli } : null;
+        if (p) conta = { tipo: "posto", chave: "p:" + p.id, nome: `Posto ${p.nome} (${p.cnpj})`, postoId: p.id, p, alt: contaCli };
+        else if (contaCli) conta = contaCli;
+        else if (validCNPJ(cnpj) || docClienteValido(dig)) return erro("CNPJ/CPF ou senha incorretos. Se esqueceu a senha, fale com a matriz.", 401);
+        else return erro("Usuário ou senha incorretos.", 401);
       }
     }
     const bl = await bloqueioAtivo(env, conta.chave);
@@ -442,11 +471,14 @@ async function api(request, env, url) {
     let certa = false;
     if (conta.tipo === "admin") certa = iguais(String(senha), env.ADMIN_PASSWORD || "admin");
     else if (conta.tipo === "matriz") certa = !!conta.usr.ativo && iguais(await hashSenha(String(senha), conta.usr.salt), conta.usr.senha_hash);
+    else if (conta.tipo === "cliente") certa = await senhaClienteConfere(conta.cli, senha);
     else certa = iguais(await hashSenha(String(senha), conta.p.salt), conta.p.senha_hash);
+    // mesmo CNPJ como posto e como cliente: a senha decide qual acesso abre
+    if (!certa && conta.alt && !(await bloqueioAtivo(env, conta.alt.chave)) && await senhaClienteConfere(conta.alt.cli, senha)) { conta = conta.alt; certa = true; }
     if (!certa) {
       const r = await senhaErrada(env, request, conta.chave, conta);
       if (r.bloqueadoAte) return erro(msgBloqueio(r.bloqueadoAte, conta.tipo === "admin"), 423);
-      const base = conta.tipo === "posto" ? "CNPJ ou senha incorretos." : "Usuário ou senha incorretos.";
+      const base = conta.tipo === "posto" ? "CNPJ ou senha incorretos." : conta.tipo === "cliente" ? "CNPJ/CPF ou senha incorretos." : "Usuário ou senha incorretos.";
       return erro(`${base} ${r.restantes === 1 ? "Resta 1 tentativa" : `Restam ${r.restantes} tentativas`} antes do bloqueio.`, 401);
     }
     await env.DB.prepare("UPDATE bloqueios SET falhas = 0 WHERE chave = ?").bind(conta.chave).run();
@@ -460,6 +492,12 @@ async function api(request, env, url) {
       await registrar(env, s, request, "login_matriz", ACOES.login_matriz);
       return json({ papel: "matriz" }, 200, { "set-cookie": await criarSessao(env, { r: "consulta", uid: conta.usr.id, s: conta.usr.salt.slice(0, 12) }) });
     }
+    if (conta.tipo === "cliente") {
+      const c = conta.cli;
+      await env.DB.prepare("UPDATE clientes SET ultimo_acesso = ? WHERE id = ?").bind(agoraISO(), c.id).run();
+      await registrar(env, { cliente: { id: c.id, doc: c.doc, nome: c.nome } }, request, "login_cliente", ACOES.login_cliente + (c.trocar_senha ? " (primeiro acesso / senha a definir)" : ""));
+      return json({ papel: "cliente" }, 200, { "set-cookie": await criarSessao(env, { r: "cliente", cid: c.id, s: c.salt.slice(0, 12) }) });
+    }
     // posto com controle de localização: só entra se o navegador mandar a localização
     const local = lerLocal(localBruto);
     if (conta.p.usa_local && !local)
@@ -472,6 +510,8 @@ async function api(request, env, url) {
 
   const s = await lerSessao(request, env);
   if (!s) return erro("Sessão expirada. Entre de novo.", 401);
+  // o cliente tem rotas próprias e nunca chega às rotas do posto ou da matriz
+  if (s.cliente) return await apiCliente(request, env, url, s);
 
   if (caminho === "/api/me" && metodo === "GET") {
     if (s.matriz) return json({ papel: s.papel, nome: s.nome, usuario: s.usuario, perms: s.perms, senhaPadrao: s.admin ? !env.ADMIN_PASSWORD : false });
@@ -574,8 +614,9 @@ async function api(request, env, url) {
     else if (quem === "postos") onde.push("ator_tipo = 'posto'");
     else if (quem === "matriz") onde.push("ator_tipo = 'matriz'");
     else if (quem === "sistema") onde.push("ator_tipo = 'sistema'");
-    else if (/^[up]:\d+$/.test(quem)) { onde.push("ator_tipo = ? AND ator_id = ?"); args.push(quem[0] === "u" ? "matriz" : "posto", +quem.slice(2)); }
-    const GRUPOS = { downloads: ["baixou_foto", "baixou_nf", "baixou_alerta_foto", "baixou_alerta_nf", "baixou_zip", "gerou_excel"], alteracoes: ["posto_criado", "posto_editado", "posto_senha", "posto_desbloqueado", "usuario_criado", "usuario_editado", "usuario_senha", "usuario_desbloqueado", "alerta_visto"], acessos: ["login_matriz", "login_admin"], aberturas: ["posto_abriu_foto", "nota_repetida"], bloqueios: ["bloqueio"] };
+    else if (quem === "clientes") onde.push("ator_tipo = 'cliente'");
+    else if (/^[upc]:\d+$/.test(quem)) { onde.push("ator_tipo = ? AND ator_id = ?"); args.push({ u: "matriz", p: "posto", c: "cliente" }[quem[0]], +quem.slice(2)); }
+    const GRUPOS = { downloads: ["baixou_foto", "baixou_nf", "baixou_alerta_foto", "baixou_alerta_nf", "baixou_zip", "gerou_excel"], alteracoes: ["posto_criado", "posto_editado", "posto_senha", "posto_desbloqueado", "usuario_criado", "usuario_editado", "usuario_senha", "usuario_desbloqueado", "alerta_visto", "cliente_editado", "cliente_senha", "cliente_desbloqueado"], acessos: ["login_matriz", "login_admin", "login_cliente"], aberturas: ["posto_abriu_foto", "nota_repetida", "cliente_abriu_foto"], bloqueios: ["bloqueio"], clientes: ["login_cliente", "termo_aceito", "cliente_trocou_senha", "cliente_abriu_foto"] };
     const g = GRUPOS[q.get("tipo") || ""]; if (g) { onde.push(`acao IN (${g.map(() => "?").join(",")})`); args.push(...g); }
     if (q.get("de")) { onde.push("dia >= ?"); args.push(q.get("de").slice(0, 10)); }
     if (q.get("ate")) { onde.push("dia <= ?"); args.push(q.get("ate").slice(0, 10)); }
@@ -584,7 +625,9 @@ async function api(request, env, url) {
     const r = await env.DB.prepare(`SELECT * FROM registros ${where} ORDER BY id DESC LIMIT ${Math.min(2000, Math.max(1, +q.get("limite") || 500))}`).bind(...args).all();
     const usuarios = (await env.DB.prepare("SELECT id, usuario, nome FROM usuarios ORDER BY nome COLLATE NOCASE").all()).results;
     const postos = (await env.DB.prepare("SELECT id, nome, cnpj FROM postos ORDER BY nome COLLATE NOCASE").all()).results;
-    return json({ registros: r.results.map(x => ({ ...x, quando: brasilia(Date.parse(x.criado_em)).texto, acao_txt: ACOES[x.acao] || x.acao })), total: total.n, usuarios, postos });
+    // clientes que já fizeram alguma ação (os demais não têm o que filtrar)
+    const clientes = (await env.DB.prepare("SELECT id, nome, doc FROM clientes WHERE id IN (SELECT DISTINCT ator_id FROM registros WHERE ator_tipo = 'cliente') ORDER BY nome COLLATE NOCASE").all()).results.map(c => ({ ...c, doc_fmt: fmtDocTxt(c.doc) }));
+    return json({ clientes, registros: r.results.map(x => ({ ...x, quando: brasilia(Date.parse(x.criado_em)).texto, acao_txt: ACOES[x.acao] || x.acao })), total: total.n, usuarios, postos });
   }
 
   /* ----- usuários da matriz (admin ou quem tem o poder "usuarios") ----- */
@@ -598,7 +641,7 @@ async function api(request, env, url) {
     };
     const txtPoderes = p => { const l = Object.keys(PODERES).filter(k => p[k]).map(k => PODERES[k]); return l.length ? l.join("; ") : "somente visualizar"; };
     if (caminho === "/api/usuarios" && metodo === "GET") {
-      const r = await env.DB.prepare("SELECT id, usuario, nome, ativo, criado_em, atualizado_em, perm_baixar, perm_alertas, perm_postos, perm_usuarios FROM usuarios ORDER BY nome COLLATE NOCASE").all();
+      const r = await env.DB.prepare("SELECT id, usuario, nome, ativo, criado_em, atualizado_em, perm_baixar, perm_alertas, perm_postos, perm_usuarios, perm_clientes FROM usuarios ORDER BY nome COLLATE NOCASE").all();
       const usuarios = [];
       for (const u of r.results) { const b = await bloqueioAtivo(env, "u:" + u.id); usuarios.push({ id: u.id, usuario: u.usuario, nome: u.nome, ativo: u.ativo, criado_em: u.criado_em, perms: poderesDe(u), bloqueado_ate: b ? b.bloqueado_ate : null, bloqueado_ate_txt: b ? brasilia(Date.parse(b.bloqueado_ate)).texto : null, eu: !s.admin && u.id === s.uid }); }
       return json({ usuarios, poderes: PODERES, meusPoderes: s.perms });
@@ -607,13 +650,13 @@ async function api(request, env, url) {
       const corpo = await request.json().catch(() => ({}));
       const u = String(corpo.usuario || "").trim().toLowerCase(), n = String(corpo.nome || "").trim().slice(0, 60), senha = String(corpo.senha || "");
       if (!/^[a-z0-9._-]{3,30}$/.test(u)) return erro("Usuário: de 3 a 30 caracteres, só letras, números, ponto, hífen ou sublinhado.");
-      if (u === "admin" || validCNPJ(u)) return erro("Esse nome de usuário não pode ser usado.");
+      if (u === "admin" || validCNPJ(u) || validCNPJ(soDig(u)) || validCPF(soDig(u))) return erro("Esse nome de usuário não pode ser usado.");
       if (!n) return erro("Informe o nome da pessoa.");
       if (senha.length < 6) return erro("A senha precisa ter pelo menos 6 caracteres.");
       if (await env.DB.prepare("SELECT id FROM usuarios WHERE usuario = ?").bind(u).first()) return erro("Esse usuário já existe.");
       const p = lerPoderes(corpo), salt = aleatorio(16);
-      await env.DB.prepare(`INSERT INTO usuarios (usuario, nome, senha_hash, salt, papel, ativo, criado_em, perm_baixar, perm_alertas, perm_postos, perm_usuarios)
-        VALUES (?, ?, ?, ?, 'matriz', 1, ?, ?, ?, ?, ?)`).bind(u, n, await hashSenha(senha, salt), salt, agoraISO(), +p.baixar, +p.alertas, +p.postos, +p.usuarios).run();
+      await env.DB.prepare(`INSERT INTO usuarios (usuario, nome, senha_hash, salt, papel, ativo, criado_em, perm_baixar, perm_alertas, perm_postos, perm_usuarios, perm_clientes)
+        VALUES (?, ?, ?, ?, 'matriz', 1, ?, ?, ?, ?, ?, ?)`).bind(u, n, await hashSenha(senha, salt), salt, agoraISO(), +p.baixar, +p.alertas, +p.postos, +p.usuarios, +p.clientes).run();
       await registrar(env, s, request, "usuario_criado", `Criou o usuário ${n} (${u}) com os poderes: ${txtPoderes(p)}`, { alvo: "usuario:" + u });
       return json({ ok: true });
     }
@@ -646,9 +689,69 @@ async function api(request, env, url) {
       if (ativo !== usr.ativo) mud.push(ativo ? "reativado" : "desativado");
       for (const k of Object.keys(PODERES)) if (antes[k] !== p[k]) mud.push(`${p[k] ? "ganhou" : "perdeu"} o poder "${PODERES[k]}"`);
       // desativar no lugar de excluir: o histórico continua intacto
-      await env.DB.prepare("UPDATE usuarios SET nome = ?, ativo = ?, perm_baixar = ?, perm_alertas = ?, perm_postos = ?, perm_usuarios = ?, atualizado_em = ? WHERE id = ?")
-        .bind(n, ativo, +p.baixar, +p.alertas, +p.postos, +p.usuarios, agoraISO(), usr.id).run();
+      await env.DB.prepare("UPDATE usuarios SET nome = ?, ativo = ?, perm_baixar = ?, perm_alertas = ?, perm_postos = ?, perm_usuarios = ?, perm_clientes = ?, atualizado_em = ? WHERE id = ?")
+        .bind(n, ativo, +p.baixar, +p.alertas, +p.postos, +p.usuarios, +p.clientes, agoraISO(), usr.id).run();
       if (mud.length) await registrar(env, s, request, "usuario_editado", `Alterou o usuário ${quem}: ${mud.join("; ")}`, { alvo: "usuario:" + usr.usuario });
+      return json({ ok: true });
+    }
+    return erro("Rota não encontrada.", 404);
+  }
+
+  /* ----- clientes (ver: toda a matriz; alterar: admin ou quem tem o poder "clientes") ----- */
+  if (caminho.startsWith("/api/clientes")) {
+    if (!s.matriz) return erro("Acesso só da matriz.", 403);
+    if (caminho === "/api/clientes" && metodo === "GET") {
+      const busca = (url.searchParams.get("q") || "").trim().toLowerCase(), d = soDig(busca);
+      const onde = [], args = [];
+      if (busca) { onde.push(d.length >= 3 ? "(lower(c.nome) LIKE ? OR c.doc LIKE ?)" : "lower(c.nome) LIKE ?"); args.push("%" + busca.replace(/[%_]/g, "") + "%"); if (d.length >= 3) args.push("%" + d + "%"); }
+      const where = onde.length ? "WHERE " + onde.join(" AND ") : "";
+      const total = await env.DB.prepare(`SELECT COUNT(*) AS n FROM clientes c ${where}`).bind(...args).first();
+      const r = await env.DB.prepare(`SELECT c.id, c.doc, c.tipo, c.nome, c.ativo, c.trocar_senha, c.nome_editado, c.termo_versao, c.termo_aceito_em, c.termo_ip,
+          c.criado_em, c.ultimo_acesso, (c.senha_hash IS NULL) AS senha_padrao,
+          (SELECT COUNT(*) FROM fotos f WHERE f.dest_doc = c.doc) AS fotos,
+          (SELECT MAX(capturado_em) FROM fotos f WHERE f.dest_doc = c.doc) AS ultima_foto
+        FROM clientes c ${where} ORDER BY c.nome COLLATE NOCASE LIMIT 500`).bind(...args).all();
+      const txt = v => v ? brasilia(Date.parse(v)).texto : null;
+      const clientes = [];
+      for (const c of r.results) {
+        const b = await bloqueioAtivo(env, "c:" + c.id);
+        clientes.push({ ...c, doc_fmt: fmtDocTxt(c.doc), termo_ok: c.termo_versao === TERMO_VERSAO, termo_aceito_txt: txt(c.termo_aceito_em),
+          ultimo_acesso_txt: txt(c.ultimo_acesso), ultima_foto_txt: txt(c.ultima_foto), bloqueado_ate_txt: b ? txt(b.bloqueado_ate) : null });
+      }
+      return json({ clientes, total: total.n, podeAlterar: pode(s, "clientes"), senhaPadrao: SENHA_PADRAO_CLIENTE, termoVersao: TERMO_VERSAO });
+    }
+    if (!pode(s, "clientes")) return erro("Seu usuário não tem permissão para alterar acessos de clientes.", 403);
+    m = caminho.match(/^\/api\/clientes\/(\d+)(\/senha|\/desbloquear)?$/);
+    if (m && metodo === "PUT") {
+      const c = await env.DB.prepare("SELECT * FROM clientes WHERE id = ?").bind(+m[1]).first();
+      if (!c) return erro("Cliente não encontrado.", 404);
+      const corpo = await request.json().catch(() => ({}));
+      const quem = `${c.nome} (${fmtDocTxt(c.doc)})`, alvo = "cliente:" + c.doc;
+      if (m[2] === "/desbloquear") {
+        await env.DB.prepare("UPDATE bloqueios SET falhas = 0, bloqueado_ate = NULL WHERE chave = ?").bind("c:" + c.id).run();
+        await registrar(env, s, request, "cliente_desbloqueado", `Desbloqueou o cliente ${quem}`, { alvo });
+        return json({ ok: true });
+      }
+      if (m[2] === "/senha") {
+        const nova = String(corpo.senha || "");
+        // sem senha informada: volta para a senha padrão; nos dois casos o cliente cria uma nova no próximo acesso
+        if (nova && (nova.length < 4 || nova.length > 60)) return erro("A senha precisa ter de 4 a 60 caracteres.");
+        const salt = aleatorio(16);
+        await env.DB.prepare("UPDATE clientes SET senha_hash = ?, salt = ?, trocar_senha = 1, atualizado_em = ? WHERE id = ?")
+          .bind(nova ? await hashSenha(nova, salt) : null, salt, agoraISO(), c.id).run();
+        await env.DB.prepare("UPDATE bloqueios SET falhas = 0, bloqueado_ate = NULL WHERE chave = ?").bind("c:" + c.id).run();
+        await registrar(env, s, request, "cliente_senha", nova ? `Definiu uma senha provisória para o cliente ${quem}` : `Voltou o cliente ${quem} para a senha padrão`, { alvo });
+        return json({ ok: true });
+      }
+      const n = String(corpo.nome || "").trim().slice(0, 100);
+      if (!n) return erro("Informe o nome do cliente.");
+      const ativo = corpo.ativo === false ? 0 : 1, mud = [];
+      if (n !== c.nome) mud.push(`nome "${c.nome}" → "${n}"`);
+      if (ativo !== c.ativo) mud.push(ativo ? "acesso reativado" : "acesso desativado");
+      // desativar no lugar de excluir: o histórico continua intacto
+      await env.DB.prepare("UPDATE clientes SET nome = ?, nome_editado = ?, ativo = ?, atualizado_em = ? WHERE id = ?")
+        .bind(n, n !== c.nome ? 1 : c.nome_editado, ativo, agoraISO(), c.id).run();
+      if (mud.length) await registrar(env, s, request, "cliente_editado", `Alterou o cliente ${quem}: ${mud.join("; ")}`, { alvo });
       return json({ ok: true });
     }
     return erro("Rota não encontrada.", 404);
@@ -789,6 +892,30 @@ async function receberAlerta(request, env, posto) {
 }
 
 /* ---------- envio da foto + nota (validações no servidor) ---------- */
+/* ---------- clientes (acesso pelo CNPJ/CPF do cliente das notas) ---------- */
+const fmtDocTxt = d => !d ? "" : d.length === 11 ? d.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, "$1.$2.$3-$4") : d.replace(/^(\w{2})(\w{3})(\w{3})(\w{4})(\w{2})$/, "$1.$2.$3/$4-$5");
+const docClienteValido = d => (d.length === 14 && validCNPJ(d)) || (d.length === 11 && validCPF(d));
+/* cria o acesso do cliente (senha padrão, troca obrigatória) e mantém o nome em dia com a nota mais recente */
+async function garantirCliente(env, doc, nome) {
+  doc = soDig(doc);
+  if (!docClienteValido(doc)) return;
+  const n = String(nome || "").trim().slice(0, 100) || "Cliente " + fmtDocTxt(doc);
+  await env.DB.prepare(`INSERT OR IGNORE INTO clientes (doc, tipo, nome, salt, trocar_senha, ativo, criado_em) VALUES (?, ?, ?, ?, 1, 1, ?)`)
+    .bind(doc, doc.length === 14 ? "PJ" : "PF", n, aleatorio(16), agoraISO()).run();
+  if (nome) await env.DB.prepare("UPDATE clientes SET nome = ? WHERE doc = ? AND nome_editado = 0 AND nome <> ?").bind(n, doc, n).run();
+}
+/* clientes das notas já enviadas antes desta versão (roda a cada início; não altera quem já existe além do nome) */
+async function sincronizarClientes(env) {
+  const r = await env.DB.prepare(`SELECT dest_doc, dest_nome, MAX(capturado_em) AS ult FROM fotos
+    WHERE dest_doc IS NOT NULL AND dest_doc <> '' AND dest_doc NOT IN (SELECT doc FROM clientes) GROUP BY dest_doc`).all();
+  for (const x of r.results) await garantirCliente(env, x.dest_doc, x.dest_nome);
+}
+async function senhaClienteConfere(c, senha) {
+  if (!c || !c.ativo) return false;
+  if (!c.senha_hash) return iguais(String(senha), SENHA_PADRAO_CLIENTE);
+  return iguais(await hashSenha(String(senha), c.salt), c.senha_hash);
+}
+
 /* nota única por posto: depois de um envio aceito, o mesmo número (ou a mesma chave de acesso) não entra de novo */
 async function notaJaEnviada(env, postoId, nota, chave) {
   const n = numInt(nota);
@@ -919,6 +1046,9 @@ async function receberFoto(request, env, posto) {
     lido && lido.dest ? corta(lido.dest.nome, 100) : null, lido && lido.dest ? corta(lido.dest.doc, 14) : null, chaveMini,
     local ? local.lat : null, local ? local.lng : null, local ? local.precisao : null, distM).run();
 
+  // o cliente da nota ganha (ou mantém) o acesso ao portal
+  if (destDoc) await garantirCliente(env, destDoc, destNome);
+
   // envio aceito, mas feito longe do local cadastrado do posto: alerta para a matriz
   if (distM != null && distM > RAIO_LOCAL_M)
     await registrarAlerta(env, posto.id, { tipo: "local_envio", nota, cliente, fotoEm: capBR.texto, ip, local, distM, origem: "servidor",
@@ -927,11 +1057,81 @@ async function receberFoto(request, env, posto) {
   return json({ ok: true, arquivo, arquivoNf, hashFoto, verificacao: verif });
 }
 
+/* ---------- rotas do cliente ---------- */
+async function apiCliente(request, env, url, s) {
+  const metodo = request.method, caminho = url.pathname, c = s.cliente;
+  if (caminho === "/api/me" && metodo === "GET")
+    return json({ papel: "cliente", cliente: { ...c, doc_fmt: fmtDocTxt(c.doc) }, pendente: s.pendente, termoVersao: TERMO_VERSAO });
+  if (caminho === "/api/cliente/termo" && metodo === "GET")
+    return json({ versao: TERMO_VERSAO, texto: TERMO_TEXTO, aceito: !s.pendente.termo });
+  if (caminho === "/api/cliente/termo" && metodo === "POST") {
+    const corpo = await request.json().catch(() => ({}));
+    if (corpo.aceito !== true || corpo.versao !== TERMO_VERSAO) return erro("Para continuar, marque que leu e aceita o termo.");
+    if (!s.pendente.termo) return json({ ok: true });
+    const agora = agoraISO(), ip = ipCliente(request), hashTexto = await sha256(new TextEncoder().encode(TERMO_TEXTO));
+    await env.DB.prepare("INSERT INTO termos_aceite (cliente_id, versao, texto_hash, aceito_em, ip, navegador) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(c.id, TERMO_VERSAO, hashTexto, agora, ip, corta(request.headers.get("user-agent"), 200)).run();
+    await env.DB.prepare("UPDATE clientes SET termo_versao = ?, termo_aceito_em = ?, termo_ip = ? WHERE id = ?").bind(TERMO_VERSAO, agora, ip, c.id).run();
+    await registrar(env, s, request, "termo_aceito", `Aceitou o termo LGPD versão ${TERMO_VERSAO} (hash do texto ${hashTexto.slice(0, 16)}…)`, { alvo: "cliente:" + c.doc });
+    return json({ ok: true });
+  }
+  if (caminho === "/api/cliente/senha" && metodo === "POST") {
+    if (s.pendente.termo) return erro("Aceite o termo antes de criar a senha.", 403);
+    const corpo = await request.json().catch(() => ({}));
+    const nova = String(corpo.nova || "");
+    const atual = await env.DB.prepare("SELECT * FROM clientes WHERE id = ?").bind(c.id).first();
+    // fora do primeiro acesso, pede a senha atual
+    if (!atual.trocar_senha && !(await senhaClienteConfere(atual, corpo.atual || ""))) return erro("A senha atual não confere.", 403);
+    if (nova.length < 4 || nova.length > 60) return erro("A senha precisa ter de 4 a 60 caracteres (letras e/ou números).");
+    if (nova === SENHA_PADRAO_CLIENTE) return erro(`A nova senha não pode ser a senha padrão (${SENHA_PADRAO_CLIENTE}).`);
+    if (soDig(nova) === c.doc) return erro("A senha não pode ser o seu CNPJ/CPF.");
+    const salt = aleatorio(16);
+    await env.DB.prepare("UPDATE clientes SET senha_hash = ?, salt = ?, trocar_senha = 0, atualizado_em = ? WHERE id = ?").bind(await hashSenha(nova, salt), salt, agoraISO(), c.id).run();
+    await registrar(env, s, request, "cliente_trocou_senha", atual.trocar_senha ? "Criou a própria senha (primeiro acesso)" : "Trocou a própria senha", { alvo: "cliente:" + c.doc });
+    // a troca de senha derruba as outras sessões; esta continua com um cookie novo
+    return json({ ok: true }, 200, { "set-cookie": await criarSessao(env, { r: "cliente", cid: c.id, s: salt.slice(0, 12) }) });
+  }
+  if (s.pendente.termo || s.pendente.senha)
+    return erro("Conclua o primeiro acesso: aceite o termo e crie a sua senha.", 403, { pendente: true });
+
+  if (caminho === "/api/opcoes" && metodo === "GET") return await opcoes(env, s);
+  if (caminho === "/api/fotos" && metodo === "GET") {
+    const resp = await listarFotos(env, s, url.searchParams);
+    if (url.searchParams.get("relatorio") === "1") {
+      const dados = await resp.clone().json();
+      await registrar(env, s, request, "gerou_excel", `Gerou relatório Excel com ${dados.fotos.length} registro(s)`);
+    }
+    return resp;
+  }
+  const mm = caminho.match(/^\/api\/fotos\/(\d+)\/mini$/);
+  if (mm && metodo === "GET") {
+    // na lista vai só a miniatura borrada; a foto inteira abre em "Ver foto" (cada abertura fica registrada)
+    const f = await env.DB.prepare("SELECT dest_doc, chave_mini FROM fotos WHERE id = ?").bind(+mm[1]).first();
+    if (!f || !f.chave_mini || f.dest_doc !== c.doc) return erro("Miniatura não encontrada.", 404);
+    return await entregarArquivo(env, f.chave_mini, "miniatura.jpg", false, false, { semCache: true });
+  }
+  const m = caminho.match(/^\/api\/fotos\/(\d+)\/(foto|nf)$/);
+  if (m && metodo === "GET") {
+    const f = await env.DB.prepare("SELECT f.*, p.nome AS posto_nome FROM fotos f LEFT JOIN postos p ON p.id = f.posto_id WHERE f.id = ?").bind(+m[1]).first();
+    // só documentos emitidos para o CNPJ/CPF do próprio cliente
+    if (!f || f.dest_doc !== c.doc) return erro("Foto não encontrada.", 404);
+    const ehNf = m[2] === "nf", baixar = url.searchParams.get("download") === "1" || ehNf;
+    const lote = corta(url.searchParams.get("lote"), 40);
+    const nome = ehNf ? f.arquivo_nf : f.arquivo;
+    if (lote) await registrar(env, s, request, "baixou_zip", "Baixou .zip com {n} arquivo(s)", { lote });
+    else if (baixar) await registrar(env, s, request, ehNf ? "baixou_nf" : "baixou_foto", `${ehNf ? "Baixou a nota" : "Baixou a foto"} ${nome} (posto ${f.posto_nome || f.posto_id}, nota ${f.nota})`, { alvo: "foto:" + f.id });
+    else await registrar(env, s, request, "cliente_abriu_foto", `Abriu a foto ${f.arquivo} (posto ${f.posto_nome || f.posto_id}, nota ${f.nota})`, { alvo: "foto:" + f.id, dedupSeg: 30 });
+    return await entregarArquivo(env, ehNf ? f.chave_nf : f.chave_foto, nome, ehNf, baixar, { semCache: true });
+  }
+  return erro("Acesso não permitido.", 403);
+}
+
 /* ---------- listagem com filtros ---------- */
 async function listarFotos(env, s, q) {
   const onde = [], args = [];
   if (s.posto) { onde.push("f.posto_id = ?"); args.push(s.posto.id); }
-  else if (q.get("posto")) { onde.push("f.posto_id = ?"); args.push(+q.get("posto")); }
+  if (s.cliente) { onde.push("f.dest_doc = ?"); args.push(s.cliente.doc); }
+  if (!s.posto && q.get("posto")) { onde.push("f.posto_id = ?"); args.push(+q.get("posto")); }
   if (q.get("mes")) { onde.push("f.cap_dia LIKE ?"); args.push(q.get("mes").slice(0, 7) + "%"); }
   if (q.get("de")) { onde.push("f.cap_dia >= ?"); args.push(q.get("de").slice(0, 10)); }
   if (q.get("ate")) { onde.push("f.cap_dia <= ?"); args.push(q.get("ate").slice(0, 10)); }
@@ -953,7 +1153,7 @@ async function listarFotos(env, s, q) {
     onde.push("(" + partes.join(" OR ") + ")");
   }
   const where = onde.length ? "WHERE " + onde.join(" AND ") : "";
-  const teto = s.matriz && q.get("relatorio") === "1" ? 20000 : 500;
+  const teto = (s.matriz || s.cliente) && q.get("relatorio") === "1" ? 20000 : 500;
   const limite = Math.min(teto, Math.max(1, +q.get("limite") || 200));
   const total = await env.DB.prepare(`SELECT COUNT(*) AS n FROM fotos f LEFT JOIN postos p ON p.id = f.posto_id ${where}`).bind(...args).first();
   const r = await env.DB.prepare(`SELECT f.id, f.posto_id, f.cliente, f.nota, f.arquivo, f.arquivo_nf, f.capturado_txt, f.cap_dia, f.recebido_em,
@@ -962,14 +1162,27 @@ async function listarFotos(env, s, q) {
       p.nome AS posto_nome, p.cnpj AS posto_cnpj
       FROM fotos f LEFT JOIN postos p ON p.id = f.posto_id ${where} ORDER BY f.capturado_em DESC LIMIT ${limite}`).bind(...args).all();
   const ocultarDoPosto = ["arquivo_nf", "ip", "ip_carimbo", "hash_foto", "hash_nf", "verif_servidor", "divergencia", "nf_chave", "nf_cnpj_emit", "recebido_em", "lat", "lng", "precisao", "dist_m"];
-  const fotos = r.results.map(f => { if (s.matriz) return f; const o = { ...f }; ocultarDoPosto.forEach(k => delete o[k]); return o; });
+  // cliente: vê foto, nota e dados do documento; os controles internos da matriz (IP, localização, divergências) ficam de fora
+  const MOSTRAR_CLIENTE = ["id", "tem_mini", "cliente", "nota", "arquivo", "arquivo_nf", "capturado_txt", "cap_dia", "dest_nome", "dest_doc", "dest_tipo",
+    "nf_emissao", "nf_serie", "nf_modelo", "nf_chave", "nf_cnpj_emit", "hash_foto", "hash_nf", "posto_nome", "posto_cnpj"];
+  const fotos = r.results.map(f => {
+    if (s.matriz) return f;
+    if (s.cliente) return Object.fromEntries(MOSTRAR_CLIENTE.map(k => [k, f[k]]));
+    const o = { ...f }; ocultarDoPosto.forEach(k => delete o[k]); return o;
+  });
   const geral = s.posto
     ? await env.DB.prepare("SELECT COUNT(*) AS n FROM fotos WHERE posto_id = ?").bind(s.posto.id).first()
+    : s.cliente ? await env.DB.prepare("SELECT COUNT(*) AS n FROM fotos WHERE dest_doc = ?").bind(s.cliente.doc).first()
     : await env.DB.prepare("SELECT COUNT(*) AS n FROM fotos").first();
   return json({ fotos, total: total.n, geral: geral.n });
 }
 
 async function opcoes(env, s) {
+  if (s.cliente) {
+    const meses = await env.DB.prepare("SELECT DISTINCT substr(cap_dia, 1, 7) AS mes FROM fotos WHERE dest_doc = ? ORDER BY mes DESC").bind(s.cliente.doc).all();
+    const postos = await env.DB.prepare("SELECT DISTINCT p.id, p.nome, p.cnpj FROM fotos f JOIN postos p ON p.id = f.posto_id WHERE f.dest_doc = ? ORDER BY p.nome COLLATE NOCASE").bind(s.cliente.doc).all();
+    return json({ meses: meses.results.map(r => r.mes), postos: postos.results });
+  }
   const filtro = s.posto ? "WHERE posto_id = ?" : "";
   const args = s.posto ? [s.posto.id] : [];
   const meses = await env.DB.prepare(`SELECT DISTINCT substr(cap_dia, 1, 7) AS mes FROM fotos ${filtro} ORDER BY mes DESC`).bind(...args).all();
