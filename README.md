@@ -43,6 +43,7 @@ Roda num único servidor Node.js, sem dependências externas. O banco é SQLite 
   - PDF da nota com o mesmo número;
   - cliente da nota;
   - emissão até 10 minutos antes ou depois da foto.
+- **Nome do cliente no cupom:** quando o endereço vem grudado no nome ("NOME LTDA - RUA X, 10 - CIDADE/UF"), o sistema corta o endereço, na leitura e também no nome enviado pelo posto. Nomes já gravados são corrigidos sozinhos quando o servidor inicia. O nome anterior fica guardado (`dest_nome_antes` / `nome_antes`), e a correção aparece no Registro de ações. Nome ajustado à mão pela matriz não é mexido.
 - **Notas aceitas:** DANFE de NF-e, em que vale a HORA DA SAÍDA, e cupom fiscal eletrônico (NFC-e). No cupom, vale a data e hora logo abaixo da série; se não houver, a que fica abaixo de "Data de autorização". O cliente do cupom vem do bloco "CONSUMIDOR" (CNPJ/CPF e o nome logo abaixo, ou "Consumidor não identificado").
 - **Fora do horário:** o envio é bloqueado com a mensagem "entre em contato com a matriz", e um alerta aparece no portal da matriz. Número de nota digitado errado não gera alerta.
 - **Downloads:** o posto não abre nem baixa fotos e notas já enviadas. A matriz baixa fotos, notas e .zip.
@@ -124,10 +125,10 @@ Roda num único servidor Node.js, sem dependências externas. O banco é SQLite 
   Antes disso, ele não vê nada.
 - **O que o cliente vê:**
   - só as fotos e notas emitidas para o CNPJ/CPF dele, de todos os postos;
-  - a lista mostra a miniatura borrada, e a foto inteira abre em "Ver foto";
-  - pode baixar foto, NF, .zip e relatório Excel;
+  - a lista mostra a miniatura borrada; a foto inteira abre em "Ver foto" e a nota em "Ver NF", desenhada na tela;
+  - **só visualização:** sem download de foto ou NF, sem .zip e sem Excel. O servidor recusa download, lote e o endereço do arquivo aberto direto no navegador, e registra a tentativa. O visualizador bloqueia o menu "salvar imagem". Captura de tela não dá para impedir; o termo trata disso;
   - não vê IP, localização, divergências nem alertas, que são controles da matriz.
-- **Histórico:** cada entrada, aceite do termo, troca de senha, abertura de foto, download, .zip e Excel do cliente vai para o Registro de ações, com data, hora e IP.
+- **Histórico:** cada entrada, aceite do termo, troca de senha, abertura de foto e de NF e tentativa de download do cliente vai para o Registro de ações, com data, hora e IP.
 - **Gestão pela matriz (aba Clientes):** toda a matriz vê a lista. Com o poder "Alterar acessos de clientes", também pode:
   - ajustar o nome (notas novas não sobrescrevem um nome ajustado);
   - desativar ou reativar o acesso;

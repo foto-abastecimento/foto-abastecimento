@@ -541,7 +541,13 @@ function montaItem(f, ehMatriz){
   }
   return el;
 }
-$("#viewClose").onclick = () => { $("#viewer").hidden = true; $("#viewImg").removeAttribute("src"); };
+$("#viewClose").onclick = () => {
+  $("#viewer").hidden = true; $("#viewImg").removeAttribute("src"); $("#viewImg").hidden = false;
+  $("#viewPdf").hidden = true; $("#viewPdf").innerHTML = "";
+  if (blobVisto){ URL.revokeObjectURL(blobVisto); blobVisto = null; }
+};
+// visualizador protegido (posto e cliente): sem menu de "salvar imagem" e sem arrastar
+$("#viewer").addEventListener("contextmenu", e => { if ($("#viewer").classList.contains("protegido")) e.preventDefault(); });
 $("#viewImg").addEventListener("dragstart", e => { if ($("#viewer").classList.contains("protegido")) e.preventDefault(); });
 
 /* =====================================================================
@@ -1007,20 +1013,55 @@ function montaItemCliente(f){
   const el = document.createElement("div"); el.className = "item";
   el.innerHTML = `${f.tem_mini ? `<img class="mini-borrada" alt="Miniatura borrada" loading="lazy" draggable="false">` : `<div class="foto-ph" aria-hidden="true"><span>FOTO</span></div>`}
     <div style="min-width:0"><div class="cli"></div><div class="when"></div><div class="meta"></div><div class="meta seg"></div>
-    <div class="row"><button data-a="ver">Ver foto</button></div></div>`;
+    <div class="row"><button data-a="ver">Ver foto</button><button data-a="nf">Ver NF</button></div></div>`;
   if (f.tem_mini) el.querySelector("img").src = `/api/fotos/${f.id}/mini`;
   el.querySelector(".cli").textContent = `Nota ${f.nota} · ${f.posto_nome || "Posto"}`;
   el.querySelector(".when").textContent = f.capturado_txt;
   el.querySelector(".meta").textContent = [`Motorista: ${f.cliente}`, f.nf_modelo ? `${f.nf_modelo}${f.nf_serie ? " série " + f.nf_serie : ""}` : "", f.nf_emissao ? `horário da nota ${f.nf_emissao}` : ""].filter(Boolean).join(" · ");
   const seg = el.querySelector(".seg");
   if (f.hash_foto){ seg.textContent = `hash ${curto(f.hash_foto)}`; seg.title = `Hash SHA-256 da foto: ${f.hash_foto}` + (f.hash_nf ? `\nHash SHA-256 da NF: ${f.hash_nf}` : ""); } else seg.remove();
-  const src = `/api/fotos/${f.id}/foto`;
-  el.querySelector('[data-a="ver"]').onclick = () => abrirViewer(src, f.arquivo, f.hash_foto, false);
-  const row = el.querySelector(".row");
-  const a1 = document.createElement("a"); a1.className = "btn"; a1.href = src + "?download=1"; a1.textContent = "Baixar foto"; row.appendChild(a1);
-  const a2 = document.createElement("a"); a2.className = "btn"; a2.href = `/api/fotos/${f.id}/nf`; a2.textContent = "Baixar NF"; row.appendChild(a2);
+  const titulo = `Nota ${f.nota} · ${f.posto_nome || ""} · ${f.capturado_txt}`;
+  el.querySelector('[data-a="ver"]').onclick = () => verFotoCliente(f.id, titulo, f.hash_foto);
+  el.querySelector('[data-a="nf"]').onclick = () => verNFCliente(f.id, titulo);
   return el;
 }
+/* cliente: só visualização. O arquivo vem por fetch (o endereço aberto direto é recusado pelo servidor)
+   e aparece num visualizador sem menu de "salvar"; a NF é desenhada na tela, página a página. */
+let blobVisto = null;
+async function buscarArquivo(url){
+  const r = await fetch(url, { headers: { "x-requested-with": "fetch" }, credentials: "same-origin" });
+  if (!r.ok) throw new Error(r.status === 401 ? "Sua sessão expirou. Entre de novo." : "Não foi possível abrir agora. Tente de novo.");
+  return await r.blob();
+}
+async function verFotoCliente(id, titulo, hash){
+  try {
+    const b = await buscarArquivo(`/api/fotos/${id}/foto`);
+    if (blobVisto) URL.revokeObjectURL(blobVisto);
+    blobVisto = URL.createObjectURL(b);
+    abrirViewer(blobVisto, titulo, hash, true);
+  } catch (e) { showMsg($("#cMsg"), e.message); }
+}
+async function verNFCliente(id, titulo){
+  if (!window.pdfjsLib) return showMsg($("#cMsg"), "O visualizador de PDF não carregou. Recarregue a página.");
+  const caixa = $("#viewPdf");
+  try {
+    const b = await buscarArquivo(`/api/fotos/${id}/nf`);
+    const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(await b.arrayBuffer()), isEvalSupported: false }).promise;
+    caixa.innerHTML = "";
+    const largura = Math.min(860, window.innerWidth - 40);
+    for (let i = 1; i <= Math.min(pdf.numPages, 5); i++){
+      const pg = await pdf.getPage(i);
+      const base = pg.getViewport({ scale: 1 }), vp = pg.getViewport({ scale: Math.min(2.5, largura / base.width) * (window.devicePixelRatio || 1) });
+      const cv = document.createElement("canvas"); cv.width = vp.width; cv.height = vp.height; cv.style.width = (vp.width / (window.devicePixelRatio || 1)) + "px";
+      await pg.render({ canvasContext: cv.getContext("2d"), viewport: vp }).promise;
+      caixa.appendChild(cv);
+    }
+    $("#viewImg").hidden = true; caixa.hidden = false;
+    $("#viewName").textContent = titulo + " · nota fiscal"; $("#viewHash").textContent = "";
+    $("#viewer").classList.add("protegido"); $("#viewer").hidden = false;
+  } catch (e) { showMsg($("#cMsg"), e.message || "Não foi possível abrir a nota agora."); }
+}
+
 async function listarCliente(){
   const de = $("#cDe").value, ate = $("#cAte").value;
   if (de && ate && de > ate) showMsg($("#cMsg"), "A data inicial é depois da data final."); else showMsg($("#cMsg"), "");
@@ -1030,8 +1071,6 @@ async function listarCliente(){
     const r = await api("/api/fotos?" + q);
     ultimaListaCliente = r.fotos;
     $("#cCount").textContent = (r.total === r.geral ? `${r.geral} registro(s)` : `${r.total} de ${r.geral} registros`) + (r.fotos.length < r.total ? ` (mostrando os ${r.fotos.length} mais recentes)` : "");
-    $("#cZip").disabled = !r.fotos.length; $("#cExcel").disabled = !r.total;
-    $("#cZipInfo").textContent = r.fotos.length ? `${r.fotos.length} fotos e ${r.fotos.length} notas no .zip` : "";
     lista.innerHTML = "";
     if (!r.fotos.length){ lista.innerHTML = `<div class="empty">${r.geral ? "Nenhum registro com esses filtros." : "Ainda não há fotos de abastecimento para este CNPJ/CPF."}</div>`; return; }
     r.fotos.forEach(f => lista.appendChild(montaItemCliente(f)));
@@ -1040,51 +1079,6 @@ async function listarCliente(){
 $("#cBusca").addEventListener("input", debounce(listarCliente));
 ["#cPosto","#cDe","#cAte"].forEach(s => $(s).addEventListener("change", listarCliente));
 $("#cLimpar").onclick = () => { ["#cBusca","#cPosto","#cDe","#cAte"].forEach(s => $(s).value = ""); listarCliente(); };
-$("#cZip").onclick = async () => {
-  const fotos = ultimaListaCliente;
-  if (!fotos.length) return;
-  if (!window.JSZip) return showMsg($("#cMsg"), "Não foi possível montar o .zip agora. Recarregue a página.");
-  const btn = $("#cZip"); btn.disabled = true;
-  const lote = Date.now().toString(36) + Math.random().toString(36).slice(2, 8); // um único registro no histórico
-  try {
-    const z = new JSZip();
-    for (let i = 0; i < fotos.length; i++){
-      const f = fotos[i];
-      showMsg($("#cMsg"), `Montando o .zip: ${i+1} de ${fotos.length}…`, "ok");
-      const pasta = `${(f.posto_nome || "posto").replace(/[\\/:*?"<>|]+/g,"-")}/`;
-      const [rf, rn] = await Promise.all([fetch(`/api/fotos/${f.id}/foto?download=1&lote=${lote}`, { credentials:"same-origin" }), fetch(`/api/fotos/${f.id}/nf?lote=${lote}`, { credentials:"same-origin" })]);
-      if (rf.ok) z.file(pasta + f.arquivo, await rf.blob());
-      if (rn.ok) z.file(pasta + f.arquivo_nf, await rn.blob());
-    }
-    baixarBlob(await z.generateAsync({ type:"blob" }), `fotos_${soDig(cliente.doc)}_${carimboArquivo()}.zip`);
-    showMsg($("#cMsg"), "Arquivo .zip gerado.", "ok");
-  } catch (e) { showMsg($("#cMsg"), "Não foi possível gerar o .zip agora. Tente de novo."); }
-  finally { btn.disabled = false; }
-};
-$("#cExcel").onclick = async () => {
-  if (!window.XLSX) return showMsg($("#cMsg"), "O gerador de Excel não carregou. Recarregue a página.");
-  const btn = $("#cExcel"); btn.disabled = true; showMsg($("#cMsg"), "Gerando o relatório…", "ok");
-  try {
-    const q = filtrosCliente(); q.set("relatorio", "1"); q.set("limite", "20000");
-    const r = await api("/api/fotos?" + q);
-    const linhas = r.fotos.map(f => ({
-      "Data/hora da foto (Brasília)": f.capturado_txt, "Posto": f.posto_nome || "", "CNPJ do posto": maskCNPJ(f.posto_cnpj || ""),
-      "Nota": f.nota, "Série": f.nf_serie || "", "Modelo": f.nf_modelo || "", "Horário da nota": f.nf_emissao || "",
-      "Motorista informado": f.cliente, "Cliente da nota": f.dest_nome || "", "CNPJ/CPF do cliente": fmtDoc(f.dest_doc || ""),
-      "Chave de acesso": f.nf_chave || "", "CNPJ emitente": maskCNPJ(f.nf_cnpj_emit || ""),
-      "Hash SHA-256 da foto": f.hash_foto || "", "Hash SHA-256 da NF": f.hash_nf || "",
-      "Arquivo da foto": f.arquivo, "Arquivo da NF": f.arquivo_nf
-    }));
-    const ws = XLSX.utils.json_to_sheet(linhas);
-    ws["!cols"] = Object.keys(linhas[0] || {}).map(k => ({ wch: Math.min(60, Math.max(12, k.length + 2)) }));
-    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Abastecimentos");
-    const out = XLSX.write(wb, { bookType:"xlsx", type:"array" });
-    baixarBlob(new Blob([out], { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), `abastecimentos_${soDig(cliente.doc)}_${carimboArquivo()}.xlsx`);
-    showMsg($("#cMsg"), `Relatório gerado com ${linhas.length} registro(s).`, "ok");
-  } catch (e) { showMsg($("#cMsg"), e.message || "Não foi possível gerar o relatório agora."); }
-  finally { btn.disabled = false; }
-};
-
 /* ----- matriz: acessos de clientes ----- */
 async function listarClientes(){
   const box = $("#clLista");

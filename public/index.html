@@ -141,7 +141,7 @@
       <p class="hint" style="margin:0" id="cTermoInfo">Para acessar as fotos e notas da sua empresa, leia e aceite o termo abaixo.</p>
       <div class="termo-texto" id="cTermoTexto" tabindex="0"></div>
       <div id="cTermoAceite" class="stack">
-        <label class="check"><input type="checkbox" id="cTermoOk"> Li e aceito o termo, tenho poderes para representar o titular deste CNPJ/CPF e sou responsável pelo download e pela guarda das fotos e notas da minha empresa.</label>
+        <label class="check"><input type="checkbox" id="cTermoOk"> Li e aceito o termo, tenho poderes para representar o titular deste CNPJ/CPF e sou responsável pelo uso e pelo sigilo das fotos e notas da minha empresa que eu visualizar.</label>
         <div class="row"><button class="primary" id="cTermoAceitar" disabled>Aceito</button><button id="cTermoRecusar">Não aceito (sair)</button></div>
       </div>
       <div class="row" id="cTermoFechar" hidden><button id="cTermoVoltar">Voltar às fotos</button></div>
@@ -169,8 +169,7 @@
         <div><label for="cAte">Data até</label><input id="cAte" type="date"></div>
         <div class="fim"><button id="cLimpar">Limpar filtros</button></div>
       </div>
-      <div class="row"><button id="cExcel" class="primary">Relatório Excel</button><button id="cZip">Baixar fotos e notas (.zip)</button><span class="hint" id="cZipInfo"></span></div>
-      <p class="hint" style="margin:0">Cada abertura e cada download ficam registrados. Na lista aparece uma miniatura borrada; use "Ver foto" para abrir a foto completa.</p>
+      <p class="hint" style="margin:0">Acesso só para visualização: as fotos e as notas abrem na tela e não podem ser baixadas. Cada abertura fica registrada. Na lista aparece uma miniatura borrada; use "Ver foto" ou "Ver NF".</p>
       <div id="cMsg" class="msg" hidden></div>
       <div class="list grade" id="cLista"></div>
     </section>
@@ -250,7 +249,7 @@
 
     <section class="panel stack" data-painel="clientes" hidden>
       <div class="row" style="justify-content:space-between"><h2>Acessos de clientes</h2><span class="count" id="clCount"></span></div>
-      <p class="hint" style="margin:0" id="clInfo">Cada CNPJ/CPF de cliente que aparece numa nota enviada ganha um acesso automático. No primeiro acesso, a senha é a padrão; o cliente aceita o termo LGPD e cria a própria senha. Ele vê e baixa só as fotos e notas emitidas para o CNPJ/CPF dele. Acessos não são excluídos: são desativados, para manter o histórico.</p>
+      <p class="hint" style="margin:0" id="clInfo">Cada CNPJ/CPF de cliente que aparece numa nota enviada ganha um acesso automático. No primeiro acesso, a senha é a padrão; o cliente aceita o termo LGPD e cria a própria senha. Ele só visualiza (sem download) as fotos e notas emitidas para o CNPJ/CPF dele. Acessos não são excluídos: são desativados, para manter o histórico.</p>
       <input id="clBusca" placeholder="Buscar cliente por nome ou CNPJ/CPF" aria-label="Buscar cliente">
       <div id="clMsg" class="msg" hidden></div>
       <div class="list" id="clLista"></div>
@@ -288,7 +287,7 @@
   </main>
 </section>
 
-<div class="viewer" id="viewer" hidden><img id="viewImg" alt="Foto ampliada"><span class="mono" id="viewName"></span><span class="mono" id="viewHash"></span><button id="viewClose">Fechar</button></div>
+<div class="viewer" id="viewer" hidden><img id="viewImg" alt="Foto ampliada"><div id="viewPdf" class="view-pdf" hidden></div><span class="mono" id="viewName"></span><span class="mono" id="viewHash"></span><button id="viewClose">Fechar</button></div>
 
 <script src="leitura-nf.js"></script>
 <script src="app.js"></script>

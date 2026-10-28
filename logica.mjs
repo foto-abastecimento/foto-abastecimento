@@ -132,7 +132,8 @@ async function ipRealDesde(env) {
 /* ---------- banco: criação e migração (só acrescenta) ---------- */
 let preparo = null;
 const COLUNAS_NOVAS = {
-  fotos: { ip: "TEXT", ip_carimbo: "TEXT", hash_foto: "TEXT", hash_nf: "TEXT", verif_servidor: "TEXT", nf_chave: "TEXT", divergencia: "TEXT", dest_nome_pdf: "TEXT", dest_doc_pdf: "TEXT", chave_mini: "TEXT", lat: "REAL", lng: "REAL", precisao: "REAL", dist_m: "REAL" },
+  fotos: { ip: "TEXT", ip_carimbo: "TEXT", hash_foto: "TEXT", hash_nf: "TEXT", verif_servidor: "TEXT", nf_chave: "TEXT", divergencia: "TEXT", dest_nome_pdf: "TEXT", dest_doc_pdf: "TEXT", chave_mini: "TEXT", lat: "REAL", lng: "REAL", precisao: "REAL", dist_m: "REAL", dest_nome_antes: "TEXT" },
+  clientes: { nome_antes: "TEXT" },
   alertas: { ip: "TEXT", ip_anterior: "TEXT", chave_foto: "TEXT", chave_nf: "TEXT", hash_foto: "TEXT", hash_nf: "TEXT", origem: "TEXT", lat: "REAL", lng: "REAL", precisao: "REAL", dist_m: "REAL" },
   postos: { lat: "REAL", lng: "REAL", usa_local: "INTEGER NOT NULL DEFAULT 0" },
   acessos: { lat: "REAL", lng: "REAL", precisao: "REAL", dist_m: "REAL" },
@@ -196,6 +197,7 @@ function preparar(env) {
       }
       await env.DB.prepare(`CREATE INDEX IF NOT EXISTS ix_fotos_ip ON fotos(posto_id, id)`).run();
       await ipRealDesde(env);
+      await corrigirNomesGravados(env);
       await sincronizarClientes(env);
     })().catch(e => { preparo = null; throw e; });
   }
@@ -307,7 +309,8 @@ const ACOES = {
   alerta_visto: "Marcou alerta como visto", bloqueio: "Bloqueio por senhas erradas", posto_abriu_foto: "Posto abriu foto",
   nota_repetida: "Posto tentou repetir nota",
   login_cliente: "Cliente entrou no portal", termo_aceito: "Cliente aceitou o termo LGPD", cliente_trocou_senha: "Cliente criou/trocou a própria senha",
-  cliente_abriu_foto: "Cliente abriu foto",
+  cliente_abriu_foto: "Cliente abriu foto", cliente_abriu_nf: "Cliente abriu nota fiscal", cliente_tentou_baixar: "Cliente tentou baixar (bloqueado)",
+  nomes_corrigidos: "Correção automática de nomes de clientes",
   cliente_editado: "Alterou acesso de cliente", cliente_senha: "Redefiniu senha de cliente", cliente_desbloqueado: "Desbloqueou cliente"
 };
 
@@ -616,7 +619,7 @@ async function api(request, env, url) {
     else if (quem === "sistema") onde.push("ator_tipo = 'sistema'");
     else if (quem === "clientes") onde.push("ator_tipo = 'cliente'");
     else if (/^[upc]:\d+$/.test(quem)) { onde.push("ator_tipo = ? AND ator_id = ?"); args.push({ u: "matriz", p: "posto", c: "cliente" }[quem[0]], +quem.slice(2)); }
-    const GRUPOS = { downloads: ["baixou_foto", "baixou_nf", "baixou_alerta_foto", "baixou_alerta_nf", "baixou_zip", "gerou_excel"], alteracoes: ["posto_criado", "posto_editado", "posto_senha", "posto_desbloqueado", "usuario_criado", "usuario_editado", "usuario_senha", "usuario_desbloqueado", "alerta_visto", "cliente_editado", "cliente_senha", "cliente_desbloqueado"], acessos: ["login_matriz", "login_admin", "login_cliente"], aberturas: ["posto_abriu_foto", "nota_repetida", "cliente_abriu_foto"], bloqueios: ["bloqueio"], clientes: ["login_cliente", "termo_aceito", "cliente_trocou_senha", "cliente_abriu_foto"] };
+    const GRUPOS = { downloads: ["baixou_foto", "baixou_nf", "baixou_alerta_foto", "baixou_alerta_nf", "baixou_zip", "gerou_excel"], alteracoes: ["posto_criado", "posto_editado", "posto_senha", "posto_desbloqueado", "usuario_criado", "usuario_editado", "usuario_senha", "usuario_desbloqueado", "alerta_visto", "cliente_editado", "cliente_senha", "cliente_desbloqueado"], acessos: ["login_matriz", "login_admin", "login_cliente"], aberturas: ["posto_abriu_foto", "nota_repetida", "cliente_abriu_foto", "cliente_abriu_nf", "cliente_tentou_baixar"], bloqueios: ["bloqueio"], clientes: ["login_cliente", "termo_aceito", "cliente_trocou_senha", "cliente_abriu_foto", "cliente_abriu_nf", "cliente_tentou_baixar"] };
     const g = GRUPOS[q.get("tipo") || ""]; if (g) { onde.push(`acao IN (${g.map(() => "?").join(",")})`); args.push(...g); }
     if (q.get("de")) { onde.push("dia >= ?"); args.push(q.get("de").slice(0, 10)); }
     if (q.get("ate")) { onde.push("dia <= ?"); args.push(q.get("ate").slice(0, 10)); }
@@ -904,6 +907,32 @@ async function garantirCliente(env, doc, nome) {
     .bind(doc, doc.length === 14 ? "PJ" : "PF", n, aleatorio(16), agoraISO()).run();
   if (nome) await env.DB.prepare("UPDATE clientes SET nome = ? WHERE doc = ? AND nome_editado = 0 AND nome <> ?").bind(n, doc, n).run();
 }
+const limparNomeCliente = (env, n) => env.LeituraNF && typeof env.LeituraNF.limparNome === "function" ? env.LeituraNF.limparNome(n) : String(n || "").trim();
+/* Corrige nomes já gravados com o endereço grudado (leitura antiga do cupom fiscal).
+   O nome anterior fica guardado em dest_nome_antes / nome_antes; nada é apagado. Roda a cada início e só mexe no que mudou. */
+async function corrigirNomesGravados(env) {
+  if (!env.LeituraNF || typeof env.LeituraNF.limparNome !== "function") return;
+  const r = await env.DB.prepare("SELECT id, dest_nome, dest_nome_pdf FROM fotos WHERE dest_nome IS NOT NULL AND dest_nome <> ''").all();
+  let n = 0;
+  for (const f of r.results) {
+    const novo = limparNomeCliente(env, f.dest_nome), novoPdf = f.dest_nome_pdf ? limparNomeCliente(env, f.dest_nome_pdf) : f.dest_nome_pdf;
+    if (novo === f.dest_nome && novoPdf === f.dest_nome_pdf) continue;
+    await env.DB.prepare("UPDATE fotos SET dest_nome = ?, dest_nome_pdf = ?, dest_nome_antes = COALESCE(dest_nome_antes, ?) WHERE id = ?").bind(novo, novoPdf, f.dest_nome, f.id).run();
+    n++;
+  }
+  // clientes: nome da nota mais recente (já corrigido); nome ajustado à mão pela matriz não muda
+  const cs = (await env.DB.prepare("SELECT id, doc, nome FROM clientes WHERE nome_editado = 0").all()).results;
+  let nc = 0;
+  for (const c of cs) {
+    const ult = await env.DB.prepare("SELECT dest_nome FROM fotos WHERE dest_doc = ? AND dest_nome IS NOT NULL AND dest_nome <> '' ORDER BY capturado_em DESC LIMIT 1").bind(c.doc).first();
+    const novo = limparNomeCliente(env, ult ? ult.dest_nome : c.nome).slice(0, 100);
+    if (!novo || novo === c.nome) continue;
+    await env.DB.prepare("UPDATE clientes SET nome = ?, nome_antes = COALESCE(nome_antes, ?) WHERE id = ?").bind(novo, c.nome, c.id).run();
+    nc++;
+  }
+  if (n || nc) await registrar(env, null, null, "nomes_corrigidos", `Corrigiu ${n} nome(s) de cliente em fotos e ${nc} acesso(s) de cliente que tinham o endereço junto (leitura de cupom fiscal). O nome anterior ficou guardado.`);
+}
+
 /* clientes das notas já enviadas antes desta versão (roda a cada início; não altera quem já existe além do nome) */
 async function sincronizarClientes(env) {
   const r = await env.DB.prepare(`SELECT dest_doc, dest_nome, MAX(capturado_em) AS ult FROM fotos
@@ -933,7 +962,8 @@ async function receberFoto(request, env, posto) {
 
   const cliente = String(m.cliente || "").trim().slice(0, 60);
   const nota = String(m.nota || "").trim().slice(0, 20);
-  const destNome = String(m.destNome || "").trim().slice(0, 100);
+  // nome do cliente sem endereço grudado (cupom fiscal)
+  const destNome = limparNomeCliente(env, String(m.destNome || "").trim()).slice(0, 100);
   const destDoc = soDig(m.destDoc);
   if (!cliente) return erro("Informe o cliente/motorista.");
   if (!nota || !numInt(nota)) return erro("Informe o número da nota.");
@@ -1096,12 +1126,9 @@ async function apiCliente(request, env, url, s) {
 
   if (caminho === "/api/opcoes" && metodo === "GET") return await opcoes(env, s);
   if (caminho === "/api/fotos" && metodo === "GET") {
-    const resp = await listarFotos(env, s, url.searchParams);
-    if (url.searchParams.get("relatorio") === "1") {
-      const dados = await resp.clone().json();
-      await registrar(env, s, request, "gerou_excel", `Gerou relatório Excel com ${dados.fotos.length} registro(s)`);
-    }
-    return resp;
+    // acesso do cliente: só visualização (sem relatório para baixar)
+    if (url.searchParams.get("relatorio") === "1") return erro("O acesso do cliente é só para visualização.", 403);
+    return await listarFotos(env, s, url.searchParams);
   }
   const mm = caminho.match(/^\/api\/fotos\/(\d+)\/mini$/);
   if (mm && metodo === "GET") {
@@ -1115,13 +1142,16 @@ async function apiCliente(request, env, url, s) {
     const f = await env.DB.prepare("SELECT f.*, p.nome AS posto_nome FROM fotos f LEFT JOIN postos p ON p.id = f.posto_id WHERE f.id = ?").bind(+m[1]).first();
     // só documentos emitidos para o CNPJ/CPF do próprio cliente
     if (!f || f.dest_doc !== c.doc) return erro("Foto não encontrada.", 404);
-    const ehNf = m[2] === "nf", baixar = url.searchParams.get("download") === "1" || ehNf;
-    const lote = corta(url.searchParams.get("lote"), 40);
-    const nome = ehNf ? f.arquivo_nf : f.arquivo;
-    if (lote) await registrar(env, s, request, "baixou_zip", "Baixou .zip com {n} arquivo(s)", { lote });
-    else if (baixar) await registrar(env, s, request, ehNf ? "baixou_nf" : "baixou_foto", `${ehNf ? "Baixou a nota" : "Baixou a foto"} ${nome} (posto ${f.posto_nome || f.posto_id}, nota ${f.nota})`, { alvo: "foto:" + f.id });
-    else await registrar(env, s, request, "cliente_abriu_foto", `Abriu a foto ${f.arquivo} (posto ${f.posto_nome || f.posto_id}, nota ${f.nota})`, { alvo: "foto:" + f.id, dedupSeg: 30 });
-    return await entregarArquivo(env, ehNf ? f.chave_nf : f.chave_foto, nome, ehNf, baixar, { semCache: true });
+    const ehNf = m[2] === "nf", nome = ehNf ? f.arquivo_nf : f.arquivo;
+    // acesso do cliente: só visualização na tela; download, .zip e lote são recusados (e a tentativa fica registrada)
+    if (url.searchParams.get("download") === "1" || url.searchParams.get("lote")) {
+      await registrar(env, s, request, "cliente_tentou_baixar", `Tentou baixar ${ehNf ? "a nota" : "a foto"} ${nome} (nota ${f.nota}); bloqueado: acesso só de visualização`, { alvo: "foto:" + f.id, dedupSeg: 30 });
+      return erro("O acesso do cliente é só para visualização.", 403);
+    }
+    // a tela pede o arquivo por fetch para mostrar; o endereço aberto direto no navegador (que permitiria salvar) é recusado
+    if (request.headers.get("x-requested-with") !== "fetch") return erro("O acesso do cliente é só para visualização.", 403);
+    await registrar(env, s, request, ehNf ? "cliente_abriu_nf" : "cliente_abriu_foto", `Abriu ${ehNf ? "a nota" : "a foto"} ${nome} (posto ${f.posto_nome || f.posto_id}, nota ${f.nota})`, { alvo: (ehNf ? "nf:" : "foto:") + f.id, dedupSeg: 30 });
+    return await entregarArquivo(env, ehNf ? f.chave_nf : f.chave_foto, "visualizacao", ehNf, false, { semCache: true });
   }
   return erro("Acesso não permitido.", 403);
 }

@@ -73,6 +73,28 @@ function destPorPosicao(itens, cnpjEmit){
   if (!nome && !doc) return null;
   return { nome: nome.slice(0,100), doc };
 }
+/* Nome do cliente sem o endereço que às vezes vem grudado (cupom fiscal: "NOME LTDA - RUA X, 10 - CIDADE/UF").
+   1º: depois de um sufixo de empresa (LTDA, S/A, EIRELI, EPP, ME) seguido de texto com cara de endereço, corta após o sufixo;
+   2º: senão, corta antes de uma palavra de endereço (RUA, AV., RODOVIA...) quando logo depois vem número, S/N, vírgula ou cidade/UF;
+   3º: tira CEP, telefone e documentos que sobraram no fim. Nome sem endereço não muda. */
+const RE_SINAL_END = /\d|S\/N\b|,|\/\s?[A-Z]{2}\b|\s[-–]\s?[A-Z]{2}\b\s*$/i;
+const RE_PALAVRA_END = /(?:^|[\s,\-–|])(?:RUA|R\.|AV\.?|AVENIDA|ROD\.?|RODOVIA|ESTRADA|EST\.|TRAVESSA|TV\.|ALAMEDA|AL\.|PRA[ÇC]A|P[ÇC]A\.?|LINHA|LOTEAMENTO|LOTE|QUADRA|QD\.?|S[ÍI]TIO|FAZENDA|CH[ÁA]CARA|ENDERE[ÇC]O|END\.?|BAIRRO|CENTRO|BR[- ]?\d{2,3}|PR[- ]?\d{2,3}|SC[- ]?\d{2,3}|RS[- ]?\d{2,3}|KM\s*\d)(?=[\s:.,]|$)/i;
+function limparNome(nome){
+  const orig = String(nome || "").replace(/\s+/g, " ").trim();
+  let t = orig; if (!t) return t;
+  // textos do próprio cupom que vêm logo depois do bloco do consumidor
+  t = t.replace(/\s*[-–|]?\s*\b(?:NFC-?e\b|S[ÉE]RIE\b|VIA\s+(?:DO\s+)?CONSUMIDOR|VIA\s+ESTABELECIMENTO|PROTOCOLO\b|CONSULTE\b|CHAVE\s+DE\s+ACESSO|DATA\s+D[EA]\s+(?:AUTORIZA|EMISS)|EMISS[ÃA]O\b).*$/i, "").trim() || t;
+  const suf = t.match(/^(.*?\b(?:LTDA|S\/A|S\.A\.?|EIRELI|EPP|ME)\b\.?)\s*[-–,|:]?\s+(.+)$/i);
+  if (suf && suf[1].trim().split(" ").length >= 2 && (RE_SINAL_END.test(suf[2]) || RE_PALAVRA_END.test(" " + suf[2]))) t = suf[1];
+  else {
+    const k = t.search(RE_PALAVRA_END);
+    if (k > 0){ const resto = t.slice(k); if (RE_SINAL_END.test(resto.slice(0, 80)) || /^[\s,\-–|]*(?:ENDERE[ÇC]O|END\.?)\s*:/i.test(resto)) t = t.slice(0, k); }
+  }
+  t = t.replace(/\s*[-–,|]?\s*\b(?:CEP|FONE|TEL|TELEFONE|CNPJ|CPF|IE|INSC)\b.*$/i, "");
+  t = t.replace(/[\s\-–,|:;\/]+$/, "").trim();
+  return (t.match(/[A-Za-zÀ-ÿ]/g) || []).length >= 2 ? t : orig;
+}
+
 /* NFC-e (cupom fiscal eletrônico): bloco "CONSUMIDOR CNPJ/CPF: ..." com o nome na linha de baixo */
 const RE_CONSUMIDOR = /^\s*CONSUMIDOR\b(?!\s+ELETR)/i;
 function docsNoTexto(s, cnpjEmit){
@@ -98,9 +120,13 @@ function destNFCe(itens, cnpjEmit){
   if (naLinha){
     doc = naLinha.d;
     nome = linhaRot.slice(naLinha.fim).replace(/^[\s\-–:|]+/, "").replace(/^NOME\s*:?\s*/i, "").trim();
-    // nome comprido que quebrou para a linha de baixo (só letras, sem cara de endereço ou rótulo)
+    // nome comprido que quebrou para a linha de baixo: só junta se a linha do rótulo chegou à margem direita
+    // (senão a linha de baixo é outra informação, como o bairro) e se ela tem só letras, sem cara de endereço
     const cont = linhas[0] || "";
-    if (nome && /^[A-ZÀ-Ý .&'-]{2,60}$/.test(cont) && !/\b(RUA|R\.|AV|AVENIDA|ROD|RODOVIA|ESTRADA|LINHA|TRAV|ALAMEDA|PRA[ÇC]A|NFC|S[ÉE]RIE|VIA|PROTOCOLO|CONSULTE|CHAVE)\b/.test(cont)) nome = (nome + " " + cont).trim();
+    const fimLinha = Math.max(...pg.filter(i => Math.abs(i.y - rot.y) < 2).map(i => i.x + i.w));
+    const margem = Math.max(...pg.map(i => i.x + i.w));
+    const quebrou = fimLinha >= margem * 0.9;
+    if (nome && quebrou && /^[A-ZÀ-Ý .&'-]{2,60}$/.test(cont) && !RE_PALAVRA_END.test(" " + cont) && !/\b(NFC|S[ÉE]RIE|VIA|PROTOCOLO|CONSULTE|CHAVE)\b/.test(cont)) nome = (nome + " " + cont).trim();
   } else if (linhas[0]){
     const l0 = docsNoTexto(linhas[0], cnpjEmit);
     if (l0){ doc = l0.d; nome = linhas[0].slice(l0.fim).replace(/^[\s\-–:|]+/, "").replace(/^NOME\s*:?\s*/i, "").trim(); resto = linhas.slice(1); }
@@ -109,6 +135,7 @@ function destNFCe(itens, cnpjEmit){
     const l = resto.find(x => (x.match(/[A-Za-zÀ-ÿ]/g) || []).length >= 3 && !/^(CPF|CNPJ|ID\b|NFC-?e|S[ÉE]RIE|PROTOCOLO|VIA\b)/i.test(x));
     nome = l ? l.replace(/^NOME\s*:?\s*/i, "").trim() : "";
   }
+  nome = limparNome(nome);
   if (!nome && !doc) return null;
   return { nome: nome.slice(0, 100), doc };
 }
@@ -224,8 +251,9 @@ function analisar(texto, itens){
   const ehCupom = info.modelo === "NFC-e" || (!info.modelo && ehNFCe(texto));
   const pos = (ehCupom && destNFCe(itens, info.cnpjEmit || "")) || destPorPosicao(itens, info.cnpjEmit || ""), txt = destPorTexto(texto, info.cnpjEmit || "");
   const dest = pos ? { nome: pos.nome || (txt && txt.nome) || "", doc: pos.doc || (txt && txt.doc) || "" } : (txt || { nome: "", doc: "" });
+  if (dest.nome) dest.nome = limparNome(dest.nome).slice(0, 100);
   return { lido: true, ...info, emissao: acharEmissao(texto, itens), dest };
 }
 
-raiz.LeituraNF = { analisar, acharChave, acharNumeroImpresso, acharEmissao, destPorPosicao, destPorTexto, destNFCe, validCNPJ, validCPF, numInt, soDig };
+raiz.LeituraNF = { analisar, limparNome, acharChave, acharNumeroImpresso, acharEmissao, destPorPosicao, destPorTexto, destNFCe, validCNPJ, validCPF, numInt, soDig };
 })(typeof globalThis !== "undefined" ? globalThis : this);
