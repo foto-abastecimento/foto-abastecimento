@@ -77,8 +77,10 @@ const ASSETS = {
 const contextoLeitura = {};
 vm.runInNewContext(fs.readFileSync(path.join(PUBLICO, "leitura-nf.js"), "utf8"), contextoLeitura);
 
+// espaço livre no volume (os envios param antes de o disco encher)
+const espacoLivre = () => { try { const f = fs.statfsSync(PASTA_ARQ); return Number(f.bavail) * Number(f.bsize); } catch { return null; } };
 const env = {
-  DB, FILES, ASSETS,
+  DB, FILES, ASSETS, espacoLivre,
   lerPDF: bytes => extrairTextoPDF(Buffer.from(bytes)),
   LeituraNF: contextoLeitura.LeituraNF,
   ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || "",

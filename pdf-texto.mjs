@@ -14,6 +14,20 @@ import crypto from "node:crypto";
 const BRANCO = new Set([0, 9, 10, 12, 13, 32]);
 const DELIM = new Set("()<>[]{}/%".split("").map(c => c.charCodeAt(0)));
 
+/* ---------- orçamento de leitura (proteção contra PDF malicioso) ----------
+   Um PDF pequeno pode descompactar para gigabytes (bomba de compressão) ou chamar o mesmo
+   formulário milhares de vezes em cascata, travando o servidor para todos. Cada leitura tem um
+   orçamento: estourou, a leitura para com LimitePDF. Uma nota fiscal real fica muito abaixo disso. */
+export class LimitePDF extends Error { constructor(m) { super(m); this.limitePDF = true; } }
+const ORCAMENTO = { bytes: 48 * 1024 * 1024, porStream: 16 * 1024 * 1024, tokens: 4000000, chamadas: 300, profundidade: 200, ms: 4000 };
+let ORC = null;
+function gastar(campo, qtd = 1) {
+  if (!ORC) return;
+  ORC[campo] -= qtd;
+  if (ORC[campo] < 0) throw new LimitePDF(`PDF complexo demais para ler (${campo}).`);
+  if ((++ORC.passos & 4095) === 0 && Date.now() > ORC.ate) throw new LimitePDF("PDF demorou demais para ler.");
+}
+
 /* ---------- léxico ---------- */
 class Lexer {
   constructor(buf, pos = 0) { this.b = buf; this.p = pos; }
@@ -27,6 +41,7 @@ class Lexer {
     }
   }
   token() {
+    gastar("tokens");
     this.pularBranco();
     const b = this.b; if (this.p >= b.length) return null;
     const c = b[this.p];
@@ -75,7 +90,8 @@ class Lexer {
 
 /* ---------- objetos ---------- */
 class Ref { constructor(n, g) { this.n = n; this.g = g; } }
-function lerValor(lx, tk = lx.token()) {
+function lerValor(lx, tk = lx.token(), prof = 0) {
+  if (prof > ORCAMENTO.profundidade) throw new LimitePDF("PDF com estrutura aninhada demais.");
   if (!tk) return null;
   if (tk.t === "num") {
     const salvo = lx.p, t2 = lx.token();
@@ -87,10 +103,10 @@ function lerValor(lx, tk = lx.token()) {
     lx.p = salvo; return tk.v;
   }
   if (tk.t === "str" || tk.t === "name") return tk.t === "name" ? { nome: tk.v } : tk.v;
-  if (tk.t === "[") { const a = []; for (;;) { const t = lx.token(); if (!t || t.t === "]") return a; a.push(lerValor(lx, t)); } }
+  if (tk.t === "[") { const a = []; for (;;) { const t = lx.token(); if (!t || t.t === "]") return a; a.push(lerValor(lx, t, prof + 1)); } }
   if (tk.t === "<<") {
     const d = {};
-    for (;;) { const t = lx.token(); if (!t || t.t === ">>") return d; if (t.t === "name") d[t.v] = lerValor(lx); }
+    for (;;) { const t = lx.token(); if (!t || t.t === ">>") return d; if (t.t === "name") d[t.v] = lerValor(lx, undefined, prof + 1); }
   }
   if (tk.t === "kw") { if (tk.v === "true") return true; if (tk.v === "false") return false; if (tk.v === "null") return null; return { kw: tk.v }; }
   return null;
@@ -158,7 +174,7 @@ class Documento {
         const num = lx.token().v, off = lx.token().v;
         if (!this.pos.has(num) && !this.objStm.has(num)) this.objStm.set(num, { buf: dados, off: primeiro + off });
       }
-    } catch { /* object stream ilegível: segue sem ele */ }
+    } catch (e) { if (e && e.limitePDF) throw e; /* object stream ilegível: segue sem ele */ }
   }
   resolver(v, prof = 0) {
     while (v instanceof Ref && prof++ < 20) { const o = this.objCru(v.n); v = o ? (o.stream ? o : o.valor) : null; }
@@ -234,9 +250,21 @@ class Documento {
 
 function decodificar(filtro, dados) {
   switch (filtro) {
-    case "FlateDecode": case "Fl":
-      try { return zlib.inflateSync(dados, { finishFlush: zlib.constants.Z_SYNC_FLUSH }); }
-      catch { try { return zlib.inflateRawSync(dados, { finishFlush: zlib.constants.Z_SYNC_FLUSH }); } catch { return Buffer.alloc(0); } }
+    case "FlateDecode": case "Fl": {
+      // limite de saída: a descompactação para antes de passar do orçamento (bomba de compressão)
+      const lim = Math.max(1, Math.min(ORCAMENTO.porStream, ORC ? ORC.bytes : ORCAMENTO.porStream));
+      const op = { finishFlush: zlib.constants.Z_SYNC_FLUSH, maxOutputLength: lim };
+      const grande = e => e && (e.code === "ERR_BUFFER_TOO_LARGE" || e instanceof RangeError);
+      let out;
+      try { out = zlib.inflateSync(dados, op); }
+      catch (e) {
+        if (grande(e)) throw new LimitePDF("PDF descompacta para um tamanho grande demais.");
+        try { out = zlib.inflateRawSync(dados, op); }
+        catch (e2) { if (grande(e2)) throw new LimitePDF("PDF descompacta para um tamanho grande demais."); return Buffer.alloc(0); }
+      }
+      gastar("bytes", out.length);
+      return out;
+    }
     case "ASCIIHexDecode": case "AHx": {
       const h = dados.toString("latin1").replace(/>.*$/s, "").replace(/[^0-9a-fA-F]/g, "");
       return Buffer.from(h.length % 2 ? h + "0" : h, "hex");
@@ -292,7 +320,7 @@ function carregarFonte(doc, ref) {
   const d = doc.dicionario(ref) || {};
   const sub = nomeDe(d.Subtype);
   const f = { tipo0: sub === "Type0", bytes: sub === "Type0" ? 2 : 1, uni: null, dif: {}, larguras: new Map(), padrao: sub === "Type0" ? 1000 : 500, primeiro: 0 };
-  try { const tu = doc.resolver(d.ToUnicode); if (tu && tu.stream) { const cm = lerCMap(doc.dadosStream(tu)); f.uni = cm.mapa; if (f.tipo0) f.bytes = cm.bytes; } } catch {}
+  try { const tu = doc.resolver(d.ToUnicode); if (tu && tu.stream) { const cm = lerCMap(doc.dadosStream(tu)); f.uni = cm.mapa; if (f.tipo0) f.bytes = cm.bytes; } } catch (e) { if (e && e.limitePDF) throw e; }
   if (!f.tipo0) {
     const enc = doc.resolver(d.Encoding);
     const encD = enc && !nomeDe(enc) ? enc : null;
@@ -389,6 +417,7 @@ function interpretar(doc, dados, recursos, ctmInicial, pagina, saida, prof = 0) 
         }
         case "Do": {
           if (prof > 6) break;
+          gastar("chamadas");
           const xo = doc.dicionario(recursos && recursos.XObject) || {};
           const alvo = doc.resolver(xo[nomeDe(a[a.length - 1])]);
           if (alvo && alvo.stream && nomeDe(alvo.dict.Subtype) === "Form") {
@@ -405,7 +434,7 @@ function interpretar(doc, dados, recursos, ctmInicial, pagina, saida, prof = 0) 
           lx.p = i; break;
         }
       }
-    } catch { /* operador malformado: ignora e segue */ }
+    } catch (e) { if (e && e.limitePDF) throw e; /* operador malformado: ignora e segue */ }
     ops.length = 0;
   }
 }
@@ -432,6 +461,10 @@ function juntarPedacos(lista) {
 
 /* ---------- entrada ---------- */
 export function extrairTextoPDF(buf, maxPaginas = 3) {
+  ORC = { ...ORCAMENTO, passos: 0, ate: Date.now() + ORCAMENTO.ms };
+  try { return extrair(buf, maxPaginas); } finally { ORC = null; }
+}
+function extrair(buf, maxPaginas) {
   if (!Buffer.isBuffer(buf)) buf = Buffer.from(buf);
   if (buf.toString("latin1", 0, 1024).indexOf("%PDF-") < 0) throw new Error("Arquivo não é PDF.");
   const doc = new Documento(buf);

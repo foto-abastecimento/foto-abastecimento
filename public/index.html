@@ -24,11 +24,12 @@
         <img src="logo-delta.png" alt="Delta" width="342" height="194">
       </picture>
       <h1>Portal Foto Abastecimento</h1>
-      <p class="hint">Registro fotográfico de abastecimento. Clientes: entre com o CNPJ ou CPF da nota; no primeiro acesso, a senha é 1234.</p>
+      <p class="hint">Registro fotográfico de abastecimento. Clientes: entre com o CNPJ ou CPF da nota; no primeiro acesso, use a senha 1234 e o número de uma nota sua.</p>
     </div>
     <form id="fEntrar" class="stack" autocomplete="off">
       <div><label for="lUsuario">CNPJ do posto, CNPJ/CPF do cliente ou usuário da matriz</label><input id="lUsuario" class="mono" placeholder="00.000.000/0000-00" autocapitalize="none" autocomplete="username" required></div>
       <div><label for="lSenha">Senha</label><input id="lSenha" type="password" required></div>
+      <div id="lNotaBox" hidden><label for="lNota">Número de uma nota fiscal emitida para você (só no primeiro acesso)</label><input id="lNota" class="mono" inputmode="numeric" autocomplete="off" placeholder="Ex.: 260140"></div>
       <div id="lMsg" class="msg err" hidden></div>
       <button class="primary big" type="submit" id="lBtn">Entrar</button>
     </form>
@@ -191,7 +192,16 @@
       <button class="sair">Sair</button>
     </div>
   </header>
-  <div id="avisoSenha" class="aviso gut" hidden>A senha do admin ainda é a padrão (“admin”). Defina a variável ADMIN_PASSWORD no Railway (veja o README).</div>
+  <div id="avisoSenha" class="aviso gut stack" hidden>
+    <b>Crie a senha do administrador para continuar.</b>
+    <span>A senha padrão “admin” só vale para este primeiro acesso. Use pelo menos 10 caracteres. Outra opção é definir a variável ADMIN_PASSWORD no Railway (veja o README).</span>
+    <form id="fAdminSenha" class="row" autocomplete="off">
+      <input id="aSenhaNova" type="password" minlength="10" required placeholder="Nova senha (mín. 10 caracteres)" aria-label="Nova senha do admin" autocomplete="new-password">
+      <input id="aSenhaConf" type="password" minlength="10" required placeholder="Repita a nova senha" aria-label="Repita a nova senha" autocomplete="new-password">
+      <button class="primary" type="submit">Salvar senha</button>
+    </form>
+    <div id="aSenhaMsg" class="msg" hidden></div>
+  </div>
 
   <main class="admin-main gut">
     <section class="panel stack" data-painel="fotos">
@@ -233,7 +243,7 @@
         <div class="fields3">
           <div><label for="nCnpj">CNPJ do posto</label><input id="nCnpj" class="mono" placeholder="00.000.000/0000-00" required></div>
           <div><label for="nNome">Nome do posto</label><input id="nNome" maxlength="60" required></div>
-          <div><label for="nSenha">Senha de acesso</label><input id="nSenha" type="text" minlength="4" required autocomplete="off"></div>
+          <div><label for="nSenha">Senha de acesso</label><input id="nSenha" type="text" minlength="6" required autocomplete="off"></div>
         </div>
         <div class="fields3">
           <div><label for="nLat">Latitude do posto</label><input id="nLat" class="mono" inputmode="decimal" placeholder="-23.550520"></div>

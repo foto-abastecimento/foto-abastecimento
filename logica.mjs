@@ -188,7 +188,8 @@ function preparar(env) {
         env.DB.prepare(`CREATE TABLE IF NOT EXISTS termos_aceite (
           id INTEGER PRIMARY KEY AUTOINCREMENT, cliente_id INTEGER NOT NULL, versao TEXT NOT NULL, texto_hash TEXT NOT NULL,
           aceito_em TEXT NOT NULL, ip TEXT, navegador TEXT)`),
-        env.DB.prepare(`CREATE INDEX IF NOT EXISTS ix_fotos_dest ON fotos(dest_doc)`)
+        env.DB.prepare(`CREATE INDEX IF NOT EXISTS ix_fotos_dest ON fotos(dest_doc)`),
+        env.DB.prepare(`CREATE TABLE IF NOT EXISTS sessoes_encerradas (jti TEXT PRIMARY KEY, exp INTEGER NOT NULL)`)
       ]);
       // colunas novas em tabelas que já existem: ADD COLUMN preserva todos os registros
       for (const [tabela, cols] of Object.entries(COLUNAS_NOVAS)) {
@@ -216,20 +217,36 @@ async function segredo(env) {
 }
 
 /* ---------- senhas (PBKDF2) e sessão (cookie assinado) ---------- */
-async function hashSenha(senha, saltHex) {
+// PBKDF2-SHA256. Formato atual "v2$<hex>" com 600 mil iterações (recomendação OWASP);
+// hashes antigos (só <hex>, 100 mil iterações) continuam valendo e são regravados no próximo login certo.
+const ITERACOES_V2 = 600000, ITERACOES_V1 = 100000;
+async function pbkdf2(senha, saltHex, it) {
   const key = await crypto.subtle.importKey("raw", enc(senha), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt: hexToBytes(saltHex), iterations: 100000, hash: "SHA-256" }, key, 256);
-  return hex(bits);
+  return hex(await crypto.subtle.deriveBits({ name: "PBKDF2", salt: hexToBytes(saltHex), iterations: it, hash: "SHA-256" }, key, 256));
+}
+async function hashSenha(senha, saltHex) { return "v2$" + await pbkdf2(senha, saltHex, ITERACOES_V2); }
+/* confere a senha; "atualizar" = hash antigo que deve ser regravado no formato novo */
+async function conferirSenha(senha, saltHex, guardado) {
+  if (!guardado) return { ok: false };
+  if (String(guardado).startsWith("v2$")) return { ok: iguais(await hashSenha(String(senha), saltHex), guardado) };
+  const ok = iguais(await pbkdf2(String(senha), saltHex, ITERACOES_V1), guardado);
+  return { ok, atualizar: ok };
 }
 async function assinar(env, texto) {
   const key = await crypto.subtle.importKey("raw", enc(await segredo(env)), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return b64url(await crypto.subtle.sign("HMAC", key, enc(texto)));
 }
+/* senha do admin: ADMIN_PASSWORD (Railway) > senha criada no sistema (hash no banco) > "admin" com troca obrigatória */
+async function senhaAdminGuardada(env) {
+  const r = await env.DB.prepare("SELECT v FROM config WHERE k = 'admin_hash'").first();
+  return r ? r.v : null; // "salt:hash"
+}
 async function versaoAdmin(env) {
-  return hex(await crypto.subtle.digest("SHA-256", enc("admin:" + (env.ADMIN_PASSWORD || "admin")))).slice(0, 12);
+  const base = env.ADMIN_PASSWORD || (await senhaAdminGuardada(env)) || "admin";
+  return hex(await crypto.subtle.digest("SHA-256", enc("admin:" + base))).slice(0, 12);
 }
 async function criarSessao(env, dados) {
-  const corpo = b64urlTexto(JSON.stringify({ ...dados, exp: Date.now() + SESSAO_HORAS * 3600e3 }));
+  const corpo = b64urlTexto(JSON.stringify({ ...dados, jti: aleatorio(9), exp: Date.now() + SESSAO_HORAS * 3600e3 }));
   const token = corpo + "." + await assinar(env, corpo);
   return `sessao=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSAO_HORAS * 3600}`;
 }
@@ -247,6 +264,14 @@ const TODOS_PODERES = Object.fromEntries(Object.keys(PODERES).map(k => [k, true]
 const poderesDe = u => Object.fromEntries(Object.keys(PODERES).map(k => [k, !!u["perm_" + k]]));
 const pode = (s, p) => !!(s && (s.admin || (s.perms && s.perms[p])));
 
+/* dados do cookie assinado (sem consultar a conta) */
+async function dadosDoCookie(request, env) {
+  const m = (request.headers.get("cookie") || "").match(/(?:^|;\s*)sessao=([^;]+)/);
+  if (!m) return null;
+  const [corpo, sig] = m[1].split(".");
+  if (!corpo || !sig || !iguais(sig, await assinar(env, corpo))) return null;
+  try { return JSON.parse(deB64url(corpo)); } catch { return null; }
+}
 async function lerSessao(request, env) {
   const m = (request.headers.get("cookie") || "").match(/(?:^|;\s*)sessao=([^;]+)/);
   if (!m) return null;
@@ -254,7 +279,13 @@ async function lerSessao(request, env) {
   if (!corpo || !sig || !iguais(sig, await assinar(env, corpo))) return null;
   let d; try { d = JSON.parse(deB64url(corpo)); } catch { return null; }
   if (!d.exp || d.exp < Date.now()) return null;
-  if (d.r === "admin") return iguais(d.v || "", await versaoAdmin(env)) ? { admin: true, matriz: true, papel: "admin", nome: "Administrador", usuario: "admin", perms: TODOS_PODERES } : null;
+  // sessão encerrada em "Sair": o cookie copiado deixa de valer
+  if (d.jti && await env.DB.prepare("SELECT 1 AS x FROM sessoes_encerradas WHERE jti = ?").bind(String(d.jti)).first()) return null;
+  if (d.r === "admin") {
+    if (!iguais(d.v || "", await versaoAdmin(env))) return null;
+    const trocarSenhaAdmin = !env.ADMIN_PASSWORD && !(await senhaAdminGuardada(env));
+    return { admin: true, matriz: true, papel: "admin", nome: "Administrador", usuario: "admin", perms: TODOS_PODERES, trocarSenhaAdmin };
+  }
   if (d.r === "consulta") {
     const u = await env.DB.prepare("SELECT * FROM usuarios WHERE id = ?").bind(d.uid).first();
     if (!u || !u.ativo || !iguais(u.salt.slice(0, 12), d.s || "")) return null;
@@ -311,6 +342,7 @@ const ACOES = {
   login_cliente: "Cliente entrou no portal", termo_aceito: "Cliente aceitou o termo LGPD", cliente_trocou_senha: "Cliente criou/trocou a própria senha",
   cliente_abriu_foto: "Cliente abriu foto", cliente_abriu_nf: "Cliente abriu nota fiscal", cliente_tentou_baixar: "Cliente tentou baixar (bloqueado)",
   nomes_corrigidos: "Correção automática de nomes de clientes",
+  pdf_recusado: "PDF recusado na leitura de segurança", admin_senha: "Senha do admin criada/trocada", limite_envios: "Posto passou do limite de envios",
   cliente_editado: "Alterou acesso de cliente", cliente_senha: "Redefiniu senha de cliente", cliente_desbloqueado: "Desbloqueou cliente"
 };
 
@@ -332,6 +364,27 @@ async function senhaErrada(env, request, chave, conta) {
   await registrarAlerta(env, conta.postoId || 0, { tipo: "bloqueio", ip, origem: "login", detalhe: desc, cliente: conta.nome });
   return { bloqueadoAte: ate };
 }
+/* limite por janela de tempo (não depende da conta): N falhas em X min -> bloqueio de Y min */
+const LIMITE_IP = { falhas: 20, janelaMin: 15, bloqueioMin: 15 };          // por IP, somando todas as contas
+const LIMITE_ADMIN_GERAL = { falhas: 30, janelaMin: 30, bloqueioMin: 30 }; // admin, somando todos os IPs
+async function falhaNaJanela(env, request, chave, lim, descricao) {
+  const ip = ipCliente(request), agora = Date.now();
+  const b = await env.DB.prepare("SELECT falhas, atualizado_em FROM bloqueios WHERE chave = ?").bind(chave).first();
+  const dentro = b && b.atualizado_em && agora - Date.parse(b.atualizado_em) < lim.janelaMin * 60e3;
+  const falhas = (dentro ? b.falhas : 0) + 1;
+  if (falhas >= lim.falhas) {
+    const ate = new Date(agora + lim.bloqueioMin * 60e3).toISOString();
+    await env.DB.prepare(`INSERT INTO bloqueios (chave, falhas, bloqueado_ate, ultimo_ip, atualizado_em) VALUES (?, 0, ?, ?, ?)
+      ON CONFLICT(chave) DO UPDATE SET falhas = 0, bloqueado_ate = excluded.bloqueado_ate, ultimo_ip = excluded.ultimo_ip, atualizado_em = excluded.atualizado_em`).bind(chave, ate, ip, agoraISO()).run();
+    await registrar(env, null, request, "bloqueio", `${descricao} bloqueado por ${lim.bloqueioMin} min após ${lim.falhas} senhas erradas em ${lim.janelaMin} min (último IP ${ip}).`, { alvo: chave });
+    return ate;
+  }
+  await env.DB.prepare(`INSERT INTO bloqueios (chave, falhas, ultimo_ip, atualizado_em) VALUES (?, ?, ?, ?)
+    ON CONFLICT(chave) DO UPDATE SET falhas = excluded.falhas, ultimo_ip = excluded.ultimo_ip, atualizado_em = excluded.atualizado_em`).bind(chave, falhas, ip, agoraISO()).run();
+  return null;
+}
+const msgMuitasTentativas = ate => `Muitas tentativas com senha errada a partir desta rede. Tente de novo às ${brasilia(Date.parse(ate)).texto.slice(11, 16)}.`;
+
 const msgBloqueio = (ate, admin) => `Acesso bloqueado por ${LIMITE_TENTATIVAS} tentativas com senha errada. Tente de novo às ${brasilia(Date.parse(ate)).texto.slice(11, 16)}` + (admin ? "." : " ou peça o desbloqueio à matriz.");
 
 /* ---------- leitura da nota no servidor ---------- */
@@ -341,7 +394,11 @@ function lerNotaNoServidor(env, bytesNf) {
     const { texto, itens } = env.lerPDF(bytesNf);
     const a = env.LeituraNF.analisar(texto, itens);
     return a && a.lido ? a : null;
-  } catch { return null; }
+  } catch (e) {
+    // PDF que estourou o orçamento de leitura (bomba de compressão, cascata de formulários...): recusado
+    if (e && e.limitePDF) return { abuso: true, motivo: e.message };
+    return null;
+  }
 }
 
 /* ---------- alertas ---------- */
@@ -448,9 +505,14 @@ async function api(request, env, url) {
   if (caminho === "/api/time" && metodo === "GET") return json({ agora: agoraISO() });
 
   if (caminho === "/api/login" && metodo === "POST") {
-    const { usuario = "", senha = "", local: localBruto = null } = await request.json().catch(() => ({}));
+    const { usuario = "", senha = "", local: localBruto = null, nota: notaPrimeiroAcesso = "" } = await request.json().catch(() => ({}));
     await new Promise(r => setTimeout(r, 300)); // freio simples contra tentativas em sequência
     const u = String(usuario).trim();
+    // limite por IP (pulverização: a mesma senha fácil testada em muitas contas)
+    const chaveIP = "ip:" + ipCliente(request);
+    const blIP = await bloqueioAtivo(env, chaveIP);
+    if (blIP) return erro(msgMuitasTentativas(blIP.bloqueado_ate), 429);
+    const falhaIP = async () => { const ate = await falhaNaJanela(env, request, chaveIP, LIMITE_IP, `IP ${ipCliente(request)}`); return ate ? erro(msgMuitasTentativas(ate), 429) : null; };
     // identifica a conta; o bloqueio vale por conta (admin: por conta + IP, já que ninguém pode desbloqueá-lo)
     let conta = null;
     if (u.toLowerCase() === "admin") conta = { tipo: "admin", chave: "admin:" + ipCliente(request), nome: "Administrador (admin)" };
@@ -465,23 +527,47 @@ async function api(request, env, url) {
         const contaCli = cli ? { tipo: "cliente", chave: "c:" + cli.id, nome: `Cliente ${cli.nome} (${fmtDocTxt(cli.doc)})`, cli } : null;
         if (p) conta = { tipo: "posto", chave: "p:" + p.id, nome: `Posto ${p.nome} (${p.cnpj})`, postoId: p.id, p, alt: contaCli };
         else if (contaCli) conta = contaCli;
-        else if (validCNPJ(cnpj) || docClienteValido(dig)) return erro("CNPJ/CPF ou senha incorretos. Se esqueceu a senha, fale com a matriz.", 401);
-        else return erro("Usuário ou senha incorretos.", 401);
+        else {
+          // conta inexistente: mesmo custo de uma senha conferida (não revela pelo tempo se o CNPJ existe) e conta para o limite por IP
+          await hashSenha(String(senha), "00".repeat(16));
+          const r429 = await falhaIP(); if (r429) return r429;
+          return erro(validCNPJ(cnpj) || docClienteValido(dig) ? "CNPJ/CPF ou senha incorretos. Se esqueceu a senha, fale com a matriz." : "Usuário ou senha incorretos.", 401);
+        }
       }
     }
-    const bl = await bloqueioAtivo(env, conta.chave);
+    const bl = await bloqueioAtivo(env, conta.chave) || (conta.tipo === "admin" ? await bloqueioAtivo(env, "admin:todos") : null);
     if (bl) return erro(msgBloqueio(bl.bloqueado_ate, conta.tipo === "admin"), 423);
     let certa = false;
-    if (conta.tipo === "admin") certa = iguais(String(senha), env.ADMIN_PASSWORD || "admin");
-    else if (conta.tipo === "matriz") certa = !!conta.usr.ativo && iguais(await hashSenha(String(senha), conta.usr.salt), conta.usr.senha_hash);
-    else if (conta.tipo === "cliente") certa = await senhaClienteConfere(conta.cli, senha);
-    else certa = iguais(await hashSenha(String(senha), conta.p.salt), conta.p.senha_hash);
+    if (conta.tipo === "admin") {
+      const g = env.ADMIN_PASSWORD ? null : await senhaAdminGuardada(env);
+      if (env.ADMIN_PASSWORD) certa = iguais(String(senha), env.ADMIN_PASSWORD);
+      else if (g) { const [salt, h] = g.split(":"); certa = (await conferirSenha(senha, salt, h)).ok; }
+      else certa = iguais(String(senha), "admin"); // só até criar a senha, que é obrigatória no primeiro acesso
+    }
+    else if (conta.tipo === "matriz") { const c = await conferirSenha(senha, conta.usr.salt, conta.usr.senha_hash); certa = !!conta.usr.ativo && c.ok; if (certa && c.atualizar) await env.DB.prepare("UPDATE usuarios SET senha_hash = ? WHERE id = ?").bind(await hashSenha(String(senha), conta.usr.salt), conta.usr.id).run(); }
+    else if (conta.tipo === "cliente") certa = await senhaClienteConfere(conta.cli, senha, env);
+    else { const c = await conferirSenha(senha, conta.p.salt, conta.p.senha_hash); certa = c.ok; if (certa && c.atualizar) await env.DB.prepare("UPDATE postos SET senha_hash = ? WHERE id = ?").bind(await hashSenha(String(senha), conta.p.salt), conta.p.id).run(); }
     // mesmo CNPJ como posto e como cliente: a senha decide qual acesso abre
-    if (!certa && conta.alt && !(await bloqueioAtivo(env, conta.alt.chave)) && await senhaClienteConfere(conta.alt.cli, senha)) { conta = conta.alt; certa = true; }
+    if (!certa && conta.alt && !(await bloqueioAtivo(env, conta.alt.chave)) && await senhaClienteConfere(conta.alt.cli, senha, env)) { conta = conta.alt; certa = true; }
+    // cliente ainda na senha padrão: além do 1234, precisa informar o número de uma nota emitida para ele
+    // (o CNPJ é público e a senha padrão é igual para todos; sem isso, um estranho tomaria o acesso)
+    let notaErrada = false;
+    if (certa && conta.tipo === "cliente" && !conta.cli.senha_hash) {
+      const n = numInt(notaPrimeiroAcesso);
+      if (!n) return erro("Primeiro acesso: informe também o número de uma nota fiscal emitida para o seu CNPJ/CPF.", 428, { precisaNota: true });
+      const tem = await env.DB.prepare("SELECT 1 AS ok FROM fotos WHERE dest_doc = ? AND (ltrim(nota, '0') = ? OR ltrim(COALESCE(nf_numero, ''), '0') = ?) LIMIT 1").bind(conta.cli.doc, n, n).first();
+      if (!tem) { certa = false; notaErrada = true; }
+    }
     if (!certa) {
+      const r429 = await falhaIP(); if (r429) return r429;
+      if (conta.tipo === "admin") {
+        const ate = await falhaNaJanela(env, request, "admin:todos", LIMITE_ADMIN_GERAL, "Login do admin (todos os IPs)");
+        if (ate) return erro(msgBloqueio(ate, true), 423);
+      }
       const r = await senhaErrada(env, request, conta.chave, conta);
       if (r.bloqueadoAte) return erro(msgBloqueio(r.bloqueadoAte, conta.tipo === "admin"), 423);
-      const base = conta.tipo === "posto" ? "CNPJ ou senha incorretos." : conta.tipo === "cliente" ? "CNPJ/CPF ou senha incorretos." : "Usuário ou senha incorretos.";
+      const base = notaErrada ? "O número da nota não confere com as notas emitidas para este CNPJ/CPF."
+        : conta.tipo === "posto" ? "CNPJ ou senha incorretos." : conta.tipo === "cliente" ? "CNPJ/CPF ou senha incorretos." : "Usuário ou senha incorretos.";
       return erro(`${base} ${r.restantes === 1 ? "Resta 1 tentativa" : `Restam ${r.restantes} tentativas`} antes do bloqueio.`, 401);
     }
     await env.DB.prepare("UPDATE bloqueios SET falhas = 0 WHERE chave = ?").bind(conta.chave).run();
@@ -509,15 +595,40 @@ async function api(request, env, url) {
     return json({ papel: "posto" }, 200, { "set-cookie": await criarSessao(env, { r: "posto", pid: conta.p.id, s: conta.p.salt.slice(0, 12) }) });
   }
 
-  if (caminho === "/api/logout" && metodo === "POST") return json({ ok: true }, 200, { "set-cookie": apagarSessao });
+  if (caminho === "/api/logout" && metodo === "POST") {
+    const d = await dadosDoCookie(request, env);
+    if (d && d.jti) {
+      await env.DB.prepare("INSERT OR IGNORE INTO sessoes_encerradas (jti, exp) VALUES (?, ?)").bind(String(d.jti), +d.exp || 0).run();
+      await env.DB.prepare("DELETE FROM sessoes_encerradas WHERE exp < ?").bind(Date.now()).run();
+    }
+    return json({ ok: true }, 200, { "set-cookie": apagarSessao });
+  }
 
   const s = await lerSessao(request, env);
   if (!s) return erro("Sessão expirada. Entre de novo.", 401);
   // o cliente tem rotas próprias e nunca chega às rotas do posto ou da matriz
   if (s.cliente) return await apiCliente(request, env, url, s);
 
+  /* senha do admin criada no sistema (quando ADMIN_PASSWORD não está definida no Railway) */
+  if (caminho === "/api/admin/senha" && metodo === "POST") {
+    if (!s.admin) return erro("Só o administrador.", 403);
+    if (env.ADMIN_PASSWORD) return erro("A senha do admin está definida no Railway (variável ADMIN_PASSWORD). Troque por lá.", 400);
+    const corpo = await request.json().catch(() => ({}));
+    const nova = String(corpo.nova || ""), g = await senhaAdminGuardada(env);
+    if (g) { const [salt, h] = g.split(":"); if (!(await conferirSenha(corpo.atual || "", salt, h)).ok) return erro("A senha atual não confere.", 403); }
+    if (nova.length < 10) return erro("A senha do admin precisa ter pelo menos 10 caracteres.");
+    if (/^admin/i.test(nova) || /^(\d)\1+$/.test(nova) || /^(0123456789|1234567890|senha|password)/i.test(nova)) return erro("Escolha uma senha menos óbvia.");
+    const salt = aleatorio(16);
+    await env.DB.prepare("INSERT INTO config (k, v) VALUES ('admin_hash', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(salt + ":" + await hashSenha(nova, salt)).run();
+    await registrar(env, s, request, "admin_senha", g ? "Trocou a senha do admin" : "Criou a senha do admin (saiu da senha padrão)");
+    // a senha nova derruba as sessões antigas do admin; esta continua com um cookie novo
+    return json({ ok: true }, 200, { "set-cookie": await criarSessao(env, { r: "admin", v: await versaoAdmin(env) }) });
+  }
+  // admin ainda com a senha padrão "admin": nada além de criar a senha
+  if (s.trocarSenhaAdmin && caminho !== "/api/me") return erro("Crie a senha do admin antes de continuar.", 403, { trocarSenhaAdmin: true });
+
   if (caminho === "/api/me" && metodo === "GET") {
-    if (s.matriz) return json({ papel: s.papel, nome: s.nome, usuario: s.usuario, perms: s.perms, senhaPadrao: s.admin ? !env.ADMIN_PASSWORD : false });
+    if (s.matriz) return json({ papel: s.papel, nome: s.nome, usuario: s.usuario, perms: s.perms, senhaPadrao: !!s.trocarSenhaAdmin, senhaNoRailway: s.admin ? !!env.ADMIN_PASSWORD : undefined });
     return json({ papel: "posto", posto: s.posto });
   }
   if (caminho === "/api/ip" && metodo === "GET") return json({ ip: ipCliente(request) });
@@ -619,13 +730,13 @@ async function api(request, env, url) {
     else if (quem === "sistema") onde.push("ator_tipo = 'sistema'");
     else if (quem === "clientes") onde.push("ator_tipo = 'cliente'");
     else if (/^[upc]:\d+$/.test(quem)) { onde.push("ator_tipo = ? AND ator_id = ?"); args.push({ u: "matriz", p: "posto", c: "cliente" }[quem[0]], +quem.slice(2)); }
-    const GRUPOS = { downloads: ["baixou_foto", "baixou_nf", "baixou_alerta_foto", "baixou_alerta_nf", "baixou_zip", "gerou_excel"], alteracoes: ["posto_criado", "posto_editado", "posto_senha", "posto_desbloqueado", "usuario_criado", "usuario_editado", "usuario_senha", "usuario_desbloqueado", "alerta_visto", "cliente_editado", "cliente_senha", "cliente_desbloqueado"], acessos: ["login_matriz", "login_admin", "login_cliente"], aberturas: ["posto_abriu_foto", "nota_repetida", "cliente_abriu_foto", "cliente_abriu_nf", "cliente_tentou_baixar"], bloqueios: ["bloqueio"], clientes: ["login_cliente", "termo_aceito", "cliente_trocou_senha", "cliente_abriu_foto", "cliente_abriu_nf", "cliente_tentou_baixar"] };
+    const GRUPOS = { downloads: ["baixou_foto", "baixou_nf", "baixou_alerta_foto", "baixou_alerta_nf", "baixou_zip", "gerou_excel"], alteracoes: ["posto_criado", "posto_editado", "posto_senha", "posto_desbloqueado", "usuario_criado", "usuario_editado", "usuario_senha", "usuario_desbloqueado", "alerta_visto", "cliente_editado", "cliente_senha", "cliente_desbloqueado", "admin_senha"], acessos: ["login_matriz", "login_admin", "login_cliente"], aberturas: ["posto_abriu_foto", "nota_repetida", "cliente_abriu_foto", "cliente_abriu_nf", "cliente_tentou_baixar", "pdf_recusado", "limite_envios"], bloqueios: ["bloqueio"], clientes: ["login_cliente", "termo_aceito", "cliente_trocou_senha", "cliente_abriu_foto", "cliente_abriu_nf", "cliente_tentou_baixar"] };
     const g = GRUPOS[q.get("tipo") || ""]; if (g) { onde.push(`acao IN (${g.map(() => "?").join(",")})`); args.push(...g); }
     if (q.get("de")) { onde.push("dia >= ?"); args.push(q.get("de").slice(0, 10)); }
     if (q.get("ate")) { onde.push("dia <= ?"); args.push(q.get("ate").slice(0, 10)); }
     const where = onde.length ? "WHERE " + onde.join(" AND ") : "";
     const total = await env.DB.prepare(`SELECT COUNT(*) AS n FROM registros ${where}`).bind(...args).first();
-    const r = await env.DB.prepare(`SELECT * FROM registros ${where} ORDER BY id DESC LIMIT ${Math.min(2000, Math.max(1, +q.get("limite") || 500))}`).bind(...args).all();
+    const r = await env.DB.prepare(`SELECT * FROM registros ${where} ORDER BY id DESC LIMIT ${Math.floor(Math.min(2000, Math.max(1, +q.get("limite") || 500)))}`).bind(...args).all();
     const usuarios = (await env.DB.prepare("SELECT id, usuario, nome FROM usuarios ORDER BY nome COLLATE NOCASE").all()).results;
     const postos = (await env.DB.prepare("SELECT id, nome, cnpj FROM postos ORDER BY nome COLLATE NOCASE").all()).results;
     // clientes que já fizeram alguma ação (os demais não têm o que filtrar)
@@ -783,7 +894,7 @@ async function api(request, env, url) {
     const cnpj = normCNPJ(c), n = String(nome).trim().slice(0, 60);
     if (!validCNPJ(cnpj)) return erro("CNPJ inválido. Confira os dígitos.");
     if (!n) return erro("Informe o nome do posto.");
-    if (String(senha).length < 4) return erro("A senha precisa ter pelo menos 4 caracteres.");
+    if (String(senha).length < 6) return erro("A senha do posto precisa ter pelo menos 6 caracteres.");
     const loc = localDoCadastro(corpo); if (loc.erro) return erro(loc.erro);
     if (await env.DB.prepare("SELECT id FROM postos WHERE cnpj = ?").bind(cnpj).first()) return erro("Este CNPJ já está cadastrado.");
     const salt = aleatorio(16);
@@ -804,7 +915,7 @@ async function api(request, env, url) {
       return json({ ok: true });
     }
     if (m[2] === "/senha") {
-      if (String(corpo.senha || "").length < 4) return erro("A senha precisa ter pelo menos 4 caracteres.");
+      if (String(corpo.senha || "").length < 6) return erro("A senha do posto precisa ter pelo menos 6 caracteres.");
       const salt = aleatorio(16);
       await env.DB.prepare("UPDATE postos SET senha_hash = ?, salt = ?, atualizado_em = ? WHERE id = ?")
         .bind(await hashSenha(String(corpo.senha), salt), salt, agoraISO(), id).run();
@@ -871,6 +982,12 @@ async function lerArquivosDoForm(form) {
 
 /* Alerta enviado pelo posto no momento do bloqueio (com a foto e o PDF, quando houver) */
 async function receberAlerta(request, env, posto) {
+  // alertas com arquivo: limite por hora (o número da nota muda a cada tentativa e burlaria a junção de alertas iguais)
+  const ultA = await env.DB.prepare("SELECT COUNT(*) AS n FROM alertas WHERE posto_id = ? AND origem = 'posto' AND criado_em > ?").bind(posto.id, umaHoraAtras()).first();
+  if (ultA.n >= LIMITE_ALERTAS_HORA || semEspaco(env)) {
+    await registrar(env, { posto }, request, "limite_envios", `Passou de ${LIMITE_ALERTAS_HORA} alertas em 1 hora (ou disco cheio); alerta ignorado`, { dedupSeg: 600 });
+    return json({ ok: true, ignorado: "limite" });
+  }
   const tipoConteudo = request.headers.get("content-type") || "";
   let a = {}, arq = {};
   if (tipoConteudo.includes("multipart/form-data")) {
@@ -882,7 +999,8 @@ async function receberAlerta(request, env, posto) {
   const ip = ipCliente(request);
   // confere com a leitura do servidor: se o servidor lê um horário dentro do limite, não é alerta
   if (arq.nf) {
-    const lido = lerNotaNoServidor(env, arq.nf);
+    let lido = lerNotaNoServidor(env, arq.nf);
+    if (lido && lido.abuso) { arq.nf = null; lido = null; } // PDF perigoso não é guardado
     const cap = Date.parse(a.fotoEmISO || "");
     if (lido && lido.emissao && Number.isFinite(cap)) {
       const dif = Math.abs(cap - lido.emissao.ms) / 60e3;
@@ -939,10 +1057,12 @@ async function sincronizarClientes(env) {
     WHERE dest_doc IS NOT NULL AND dest_doc <> '' AND dest_doc NOT IN (SELECT doc FROM clientes) GROUP BY dest_doc`).all();
   for (const x of r.results) await garantirCliente(env, x.dest_doc, x.dest_nome);
 }
-async function senhaClienteConfere(c, senha) {
+async function senhaClienteConfere(c, senha, env = null) {
   if (!c || !c.ativo) return false;
   if (!c.senha_hash) return iguais(String(senha), SENHA_PADRAO_CLIENTE);
-  return iguais(await hashSenha(String(senha), c.salt), c.senha_hash);
+  const r = await conferirSenha(senha, c.salt, c.senha_hash);
+  if (r.ok && r.atualizar && env) await env.DB.prepare("UPDATE clientes SET senha_hash = ? WHERE id = ?").bind(await hashSenha(String(senha), c.salt), c.id).run();
+  return r.ok;
 }
 
 /* nota única por posto: depois de um envio aceito, o mesmo número (ou a mesma chave de acesso) não entra de novo */
@@ -955,7 +1075,23 @@ async function notaJaEnviada(env, postoId, nota, chave) {
 }
 const msgNotaRepetida = f => `A nota ${f.nota} já foi enviada em ${f.capturado_txt}. Cada nota só pode ser enviada uma vez. Se precisar corrigir, fale com a matriz.`;
 
+/* proteção do armazenamento: limite de envios por posto e espaço mínimo livre no volume */
+const LIMITE_ENVIOS_HORA = 200, LIMITE_ALERTAS_HORA = 30, ESPACO_MINIMO = 300 * 1024 * 1024;
+function semEspaco(env) {
+  if (typeof env.espacoLivre !== "function") return false;
+  const livre = env.espacoLivre();
+  if (livre != null && livre < ESPACO_MINIMO) { console.error(`[armazenamento] só ${Math.round(livre / 1048576)} MB livres; envios recusados`); return true; }
+  return false;
+}
+const umaHoraAtras = () => new Date(Date.now() - 3600e3).toISOString();
+
 async function receberFoto(request, env, posto) {
+  if (semEspaco(env)) return erro("O armazenamento do sistema está quase cheio. Avise a matriz.", 507);
+  const ult = await env.DB.prepare("SELECT COUNT(*) AS n FROM fotos WHERE posto_id = ? AND recebido_em > ?").bind(posto.id, umaHoraAtras()).first();
+  if (ult.n >= LIMITE_ENVIOS_HORA) {
+    await registrar(env, { posto }, request, "limite_envios", `Passou de ${LIMITE_ENVIOS_HORA} envios em 1 hora; envio recusado`, { dedupSeg: 600 });
+    return erro("Muitos envios em pouco tempo. Aguarde alguns minutos ou fale com a matriz.", 429);
+  }
   let form; try { form = await request.formData(); } catch { return erro("Envio inválido."); }
   const foto = form.get("foto"), nf = form.get("nf"), mini = form.get("mini");
   let m; try { m = JSON.parse(form.get("meta") || "{}"); } catch { return erro("Dados do envio inválidos."); }
@@ -998,6 +1134,10 @@ async function receberFoto(request, env, posto) {
   // leitura da nota pelo servidor: é ela que vale para as conferências
   const n = m.nf || {};
   const lido = lerNotaNoServidor(env, bytesNf);
+  if (lido && lido.abuso) {
+    await registrar(env, { posto }, request, "pdf_recusado", `PDF da nota ${nota} recusado na leitura de segurança: ${lido.motivo}`, { dedupSeg: 60 });
+    return erro("O PDF da nota não pôde ser lido com segurança (arquivo inválido ou complexo demais). Gere o PDF de novo no sistema emissor e tente outra vez.", 422);
+  }
   const divergencias = [];
   let numeroNota, emissao, verif;
   if (lido) {
@@ -1184,7 +1324,7 @@ async function listarFotos(env, s, q) {
   }
   const where = onde.length ? "WHERE " + onde.join(" AND ") : "";
   const teto = (s.matriz || s.cliente) && q.get("relatorio") === "1" ? 20000 : 500;
-  const limite = Math.min(teto, Math.max(1, +q.get("limite") || 200));
+  const limite = Math.floor(Math.min(teto, Math.max(1, +q.get("limite") || 200)));
   const total = await env.DB.prepare(`SELECT COUNT(*) AS n FROM fotos f LEFT JOIN postos p ON p.id = f.posto_id ${where}`).bind(...args).first();
   const r = await env.DB.prepare(`SELECT f.id, f.posto_id, f.cliente, f.nota, f.arquivo, f.arquivo_nf, f.capturado_txt, f.cap_dia, f.recebido_em,
       f.dest_nome, f.dest_doc, f.dest_tipo, f.dest_origem, f.nf_emissao, f.nf_emissao_fonte, f.dif_min, f.nf_serie, f.nf_modelo, f.nf_cnpj_emit, f.nf_chave,
@@ -1231,7 +1371,7 @@ const BLOQUEADOS = /^\/(LEIA-ME|README|schema)\b|\.md$|\.sql$/i;
 /* Diagnóstico: /api/status (não mostra dados, só se as peças estão ligadas) */
 async function status(env, request) {
   const o = origemIP(request, limpaIP);
-  const r = { ip_desta_conexao: `${o.ip} (fonte: ${o.fonte})`, cabecalho_x_forwarded_for: o.xff || "(vazio)", cabecalho_x_real_ip: o.xRealIp || "(vazio)", servidor: "ok", armazenamento: env.ARMAZENAMENTO || "", banco_DB: "", arquivos_FILES: "", leitor_pdf_servidor: typeof env.lerPDF === "function" && env.LeituraNF ? "ok" : "indisponível", senha_admin: env.ADMIN_PASSWORD ? "definida (ADMIN_PASSWORD)" : "padrão (admin)", hora_servidor: agoraISO() };
+  const r = { ip_desta_conexao: `${o.ip} (fonte: ${o.fonte})`, cabecalho_x_forwarded_for: o.xff || "(vazio)", cabecalho_x_real_ip: o.xRealIp || "(vazio)", servidor: "ok", armazenamento: env.ARMAZENAMENTO || "", banco_DB: "", arquivos_FILES: "", leitor_pdf_servidor: typeof env.lerPDF === "function" && env.LeituraNF ? "ok" : "indisponível", senha_admin: env.ADMIN_PASSWORD ? "definida (ADMIN_PASSWORD)" : (await senhaAdminGuardada(env)) ? "criada no sistema (hash no banco)" : "padrão (admin) — troca obrigatória no próximo login", hora_servidor: agoraISO(), espaco_livre: typeof env.espacoLivre === "function" && env.espacoLivre() != null ? `${Math.round(env.espacoLivre() / 1048576)} MB` : "não medido" };
   if (!env.DB || typeof env.DB.prepare !== "function") r.banco_DB = "indisponível";
   else {
     try { await preparar({ ...env, FILES: env.FILES && typeof env.FILES.put === "function" ? env.FILES : { put() {} } }); const n = await env.DB.prepare("SELECT COUNT(*) AS n FROM postos").first(); r.banco_DB = `ok (${n.n} posto(s) cadastrado(s))`; }
@@ -1245,9 +1385,50 @@ async function status(env, request) {
   return json(r);
 }
 
+/* ---------- cabeçalhos de segurança em todas as respostas ---------- */
+const CDN = "https://cdnjs.cloudflare.com/ajax/libs/";
+const CSP_PAGINA = [
+  "default-src 'self'",
+  `script-src 'self' ${CDN}pdf.js/3.11.174/ ${CDN}jszip/3.10.1/ ${CDN}xlsx/0.18.5/`,
+  `worker-src 'self' blob: ${CDN}pdf.js/3.11.174/`,
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com",
+  "img-src 'self' blob: data:",
+  "media-src 'self' blob: mediastream:",
+  "connect-src 'self'",
+  "object-src 'none'", "base-uri 'none'", "form-action 'self'", "frame-ancestors 'none'"
+].join("; ");
+function comSeguranca(resp, url) {
+  const r = new Response(resp.body, resp);
+  const h = r.headers, tipo = h.get("content-type") || "";
+  h.set("x-content-type-options", "nosniff");
+  h.set("referrer-policy", "same-origin");
+  h.set("permissions-policy", "camera=(self), microphone=(), geolocation=(self)");
+  h.set("x-frame-options", "DENY");
+  h.set("cross-origin-opener-policy", "same-origin");
+  h.set("cross-origin-resource-policy", "same-origin");
+  if (url.protocol === "https:") h.set("strict-transport-security", "max-age=31536000; includeSubDomains");
+  if (tipo.startsWith("text/html")) h.set("content-security-policy", CSP_PAGINA);
+  // fotos e PDFs enviados: nunca rodam nada (mesmo abertos direto numa aba)
+  else if (tipo.startsWith("image/") || tipo.startsWith("application/pdf")) h.set("content-security-policy", "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox");
+  else if (!h.has("content-security-policy")) h.set("content-security-policy", "default-src 'none'; frame-ancestors 'none'");
+  return r;
+}
+const ehLocal = host => /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(host || "");
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    // atrás do proxy do Railway: HTTP vira HTTPS (senhas e cookies nunca trafegam sem criptografia)
+    if (url.protocol === "http:" && request.headers.get("x-forwarded-proto") && !ehLocal(url.host)) {
+      if (request.method === "GET" || request.method === "HEAD") return new Response(null, { status: 308, headers: { location: "https://" + url.host + url.pathname + url.search } });
+      return new Response("Use HTTPS.", { status: 403 });
+    }
+    return comSeguranca(await responder(request, env, url), url);
+  }
+};
+async function responder(request, env, url) {
+  {
     if (url.pathname.startsWith("/api/")) {
       try {
         if (url.pathname === "/api/status") {
@@ -1267,12 +1448,6 @@ export default {
       }
     }
     if (BLOQUEADOS.test(url.pathname)) return new Response("Não encontrado", { status: 404 });
-    const resp = await env.ASSETS.fetch(request);
-    const r = new Response(resp.body, resp);
-    r.headers.set("x-content-type-options", "nosniff");
-    r.headers.set("referrer-policy", "same-origin");
-    r.headers.set("permissions-policy", "camera=(self), microphone=(), geolocation=(self)");
-    r.headers.set("x-frame-options", "DENY");
-    return r;
+    return await env.ASSETS.fetch(request);
   }
-};
+}

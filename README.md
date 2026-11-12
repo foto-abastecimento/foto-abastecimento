@@ -52,6 +52,39 @@ Roda num único servidor Node.js, sem dependências externas. O banco é SQLite 
 
 ## Segurança e auditoria
 
+### Revisão de segurança de 12/11/2026
+
+Testes de ataque: 41, todos bloqueados. Cada item abaixo tem pelo menos um.
+
+- **PDF malicioso:** o leitor do servidor tem um orçamento por arquivo:
+  - 48 MB descompactados no total e 16 MB por parte;
+  - 4 milhões de símbolos;
+  - 300 chamadas de formulário;
+  - 200 níveis de aninhamento;
+  - 4 segundos.
+  Estourou, o envio é recusado ("PDF não pôde ser lido com segurança") e a recusa fica no Registro de ações. Antes, uma "bomba" de 2 MB derrubava o processo por falta de memória, e uma cascata de formulários travava o servidor para todos.
+- **Primeiro acesso do cliente:** além da senha 1234, o cliente informa o número de uma nota emitida para o CNPJ/CPF dele. Número errado conta como tentativa, e são 5 até o bloqueio. Sem isso, qualquer pessoa com o CNPJ (que é público) tomaria o acesso. Senha provisória definida pela matriz não pede a nota.
+- **Senha do admin:** sem `ADMIN_PASSWORD`, o login "admin/admin" só serve para criar uma senha de pelo menos 10 caracteres, guardada como hash no banco. Antes disso, nada mais funciona. Com `ADMIN_PASSWORD` definida no Railway, vale ela.
+- **Limites de tentativas:**
+  - 5 senhas erradas por conta: conta bloqueada (já existia);
+  - 20 senhas erradas por IP em 15 min, somando todas as contas: IP bloqueado por 15 min. Isso barra a "pulverização", que é a mesma senha fácil testada em muitas contas;
+  - 30 senhas erradas do admin em 30 min, de qualquer IP: admin bloqueado por 30 min. Trocar de IP não burla.
+- **Senhas:** PBKDF2-SHA256 com 600 mil iterações (OWASP). Os hashes antigos, de 100 mil, são regravados no próximo login certo, sem ninguém trocar de senha. Login de conta inexistente leva o mesmo tempo, para não revelar quais CNPJs estão cadastrados. Senha de posto nova precisa de pelo menos 6 caracteres.
+- **Sessão:** "Sair" encerra a sessão no servidor, e um cookie copiado deixa de valer. O cookie continua HttpOnly, Secure e SameSite=Strict, com validade de 12 h.
+- **Armazenamento:**
+  - até 200 envios de foto e 30 alertas com arquivo por posto por hora;
+  - uploads recusados se o volume tiver menos de 300 MB livres;
+  - `/api/status` mostra o espaço livre.
+- **Cabeçalhos:**
+  - CSP na página: só scripts do próprio sistema e das três bibliotecas do cdnjs, nas versões fixas; sem frames e sem plugins;
+  - fotos e PDFs com CSP "sandbox";
+  - HSTS, X-Frame-Options, nosniff, COOP e CORP;
+  - HTTP redireciona para HTTPS.
+- **Conferido sem problema:** XSS (dados do servidor só entram na tela como texto), injeção de SQL (consultas parametrizadas), CSRF, caminho de arquivos, acesso de posto ou cliente a dados de outros e escalada de poderes.
+- **Bibliotecas do navegador:**
+  - pdf.js 3.11.174 tem a falha CVE-2024-4367, que fica neutralizada com `isEvalSupported: false`, usado nas duas leituras;
+  - as falhas conhecidas do xlsx 0.18.5 afetam só a leitura de planilhas, e o sistema só gera planilhas.
+
 - **Leitura da nota no servidor.** O servidor relê o PDF e faz as conferências com os dados lidos por ele:
   - número da nota;
   - hora da saída;

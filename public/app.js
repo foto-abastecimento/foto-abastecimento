@@ -91,6 +91,7 @@ function aMapa(lat, lng, texto){ const a = document.createElement("a"); a.href =
 
 // máscara: até 11 dígitos, CPF; acima disso (ou com letras), CNPJ
 const maskCPFParcial = d => d.replace(/^(\d{3})(\d)/, "$1.$2").replace(/^(\d{3})\.(\d{3})(\d)/, "$1.$2.$3").replace(/^(\d{3})\.(\d{3})\.(\d{3})(\d)/, "$1.$2.$3-$4");
+$("#lUsuario").addEventListener("change", () => { $("#lNotaBox").hidden = true; $("#lNota").value = ""; });
 $("#lUsuario").addEventListener("input", e => {
   const v = e.target.value; if (!/^\d/.test(v)) return;
   const d = soDig(v);
@@ -102,15 +103,21 @@ $("#fEntrar").addEventListener("submit", async e => {
   if (/^\d/.test(usuario) && !validCNPJ(usuario) && !validCPF(soDig(usuario))) return showMsg($("#lMsg"), "CNPJ ou CPF inválido. Confira os dígitos.");
   $("#lBtn").disabled = true;
   try {
-    try { await api("/api/login", { method:"POST", body:{ usuario, senha } }); }
+    const nota = $("#lNotaBox").hidden ? "" : $("#lNota").value.trim();
+    try { await api("/api/login", { method:"POST", body:{ usuario, senha, nota } }); }
     catch (err) {
+      // cliente no primeiro acesso: pede o número de uma nota emitida para ele
+      if (err.status === 428 && err.dados && err.dados.precisaNota){
+        $("#lNotaBox").hidden = false; $("#lNota").focus();
+        return showMsg($("#lMsg"), "Primeiro acesso: informe também o número de uma nota fiscal emitida para o seu CNPJ/CPF.", "ok");
+      }
       // posto com controle de localização: o navegador pede a autorização e o login é refeito com a posição
       if (!(err.status === 428 && err.dados && err.dados.precisaLocal)) throw err;
       showMsg($("#lMsg"), "Este acesso exige a localização. Autorize no aviso do navegador…", "ok");
       const local = await pegarLocal();
       await api("/api/login", { method:"POST", body:{ usuario, senha, local } });
     }
-    showMsg($("#lMsg"), ""); await iniciar();
+    showMsg($("#lMsg"), ""); $("#lNota").value = ""; $("#lNotaBox").hidden = true; await iniciar();
   }
   catch (err) { showMsg($("#lMsg"), err.message); }
   finally { $("#lBtn").disabled = false; }
@@ -564,10 +571,21 @@ function entrarAdmin(me){
   const tem = Object.keys(lista).filter(tenho).map(k => lista[k]);
   $("#aQuem").textContent = ehAdmin ? "Administrador" : `${me.nome || ""} · ${tem.length ? "pode: " + tem.join(", ") : "somente visualizar"}`;
   $("#avisoSenha").hidden = !me.senhaPadrao;
+  // admin ainda na senha padrão: só aparece o formulário para criar a senha
+  $("#admin .abas").hidden = $("#admin .admin-main").hidden = !!me.senhaPadrao;
+  if (me.senhaPadrao){ mostrar("#admin"); $("#aSenhaNova").focus(); return; }
   mostrar("#admin"); abrirAba("fotos");
   carregarOpcoesAdmin().then(listarAdmin);
   if (tenho("alertas")) contarAlertas();
 }
+$("#fAdminSenha").addEventListener("submit", async e => {
+  e.preventDefault();
+  const nova = $("#aSenhaNova").value, conf = $("#aSenhaConf").value;
+  if (nova !== conf) return showMsg($("#aSenhaMsg"), "As duas senhas não são iguais.");
+  if (nova.length < 10) return showMsg($("#aSenhaMsg"), "Use pelo menos 10 caracteres.");
+  try { await api("/api/admin/senha", { method:"POST", body:{ nova } }); location.reload(); }
+  catch (err) { showMsg($("#aSenhaMsg"), err.message); }
+});
 function abrirAba(aba){
   const permitido = { alertas: tenho("alertas"), usuarios: tenho("usuarios"), registros: ehAdmin };
   if (permitido[aba] === false) aba = "fotos";
@@ -830,7 +848,7 @@ function montaPosto(p, podeAlterar){
   };
   el.querySelector('[data-a="senha"]').onclick = async () => {
     const s = el.querySelector(".e-senha");
-    if (s.value.length < 4) return showMsg(msg, "A senha precisa ter pelo menos 4 caracteres.");
+    if (s.value.length < 6) return showMsg(msg, "A senha precisa ter pelo menos 6 caracteres.");
     try { await api(`/api/postos/${p.id}/senha`, { method:"PUT", body:{ senha: s.value } }); s.value = ""; showMsg(msg, "Senha alterada. O posto precisa entrar de novo com a senha nova.", "ok"); }
     catch (e) { showMsg(msg, e.message); }
   };
