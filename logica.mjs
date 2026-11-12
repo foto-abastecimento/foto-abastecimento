@@ -1420,7 +1420,9 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     // atrás do proxy do Railway: HTTP vira HTTPS (senhas e cookies nunca trafegam sem criptografia)
-    if (url.protocol === "http:" && request.headers.get("x-forwarded-proto") && !ehLocal(url.host)) {
+    // (a verificação de saúde do Railway vem por HTTP interno, de healthcheck.railway.app, e precisa de resposta 2xx)
+    const saude = url.pathname === "/api/time" || /^healthcheck\.railway\.app(:\d+)?$/i.test(url.host);
+    if (url.protocol === "http:" && request.headers.get("x-forwarded-proto") && !ehLocal(url.host) && !saude) {
       if (request.method === "GET" || request.method === "HEAD") return new Response(null, { status: 308, headers: { location: "https://" + url.host + url.pathname + url.search } });
       return new Response("Use HTTPS.", { status: 403 });
     }
