@@ -571,6 +571,12 @@ function entrarAdmin(me){
   const tem = Object.keys(lista).filter(tenho).map(k => lista[k]);
   $("#aQuem").textContent = ehAdmin ? "Administrador" : `${me.nome || ""} · ${tem.length ? "pode: " + tem.join(", ") : "somente visualizar"}`;
   $("#avisoSenha").hidden = !me.senhaPadrao;
+  // armazenamento do volume: aviso para a matriz antes de os envios pararem
+  const e = me.espaco, av = $("#avisoDisco");
+  av.hidden = !(e && (e.bloqueado || (e.pctLivre != null && e.pctLivre < 20)));
+  if (!av.hidden) av.textContent = e.bloqueado
+    ? `Armazenamento cheio: ${e.livreMB} MB livres de ${e.totalMB} MB. Os postos não conseguem enviar fotos. Aumente o volume no Railway (Volume → Settings → tamanho).`
+    : `Armazenamento: ${e.livreMB} MB livres de ${e.totalMB} MB (${e.pctLivre}%). Aumente o volume no Railway antes que encha (os envios param abaixo de ${e.reservaMB} MB).`;
   // admin ainda na senha padrão: só aparece o formulário para criar a senha
   $("#admin .abas").hidden = $("#admin .admin-main").hidden = !!me.senhaPadrao;
   if (me.senhaPadrao){ mostrar("#admin"); $("#aSenhaNova").focus(); return; }

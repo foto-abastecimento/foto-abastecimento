@@ -628,7 +628,11 @@ async function api(request, env, url) {
   if (s.trocarSenhaAdmin && caminho !== "/api/me") return erro("Crie a senha do admin antes de continuar.", 403, { trocarSenhaAdmin: true });
 
   if (caminho === "/api/me" && metodo === "GET") {
-    if (s.matriz) return json({ papel: s.papel, nome: s.nome, usuario: s.usuario, perms: s.perms, senhaPadrao: !!s.trocarSenhaAdmin, senhaNoRailway: s.admin ? !!env.ADMIN_PASSWORD : undefined });
+    if (s.matriz) {
+      const e = espaco(env);
+      return json({ papel: s.papel, nome: s.nome, usuario: s.usuario, perms: s.perms, senhaPadrao: !!s.trocarSenhaAdmin, senhaNoRailway: s.admin ? !!env.ADMIN_PASSWORD : undefined,
+        espaco: e ? { livreMB: e.livreMB, totalMB: e.totalMB, pctLivre: e.pctLivre, reservaMB: e.reservaMB, bloqueado: e.livre < e.reserva } : null });
+    }
     return json({ papel: "posto", posto: s.posto });
   }
   if (caminho === "/api/ip" && metodo === "GET") return json({ ip: ipCliente(request) });
@@ -1076,11 +1080,20 @@ async function notaJaEnviada(env, postoId, nota, chave) {
 const msgNotaRepetida = f => `A nota ${f.nota} já foi enviada em ${f.capturado_txt}. Cada nota só pode ser enviada uma vez. Se precisar corrigir, fale com a matriz.`;
 
 /* proteção do armazenamento: limite de envios por posto e espaço mínimo livre no volume */
-const LIMITE_ENVIOS_HORA = 200, LIMITE_ALERTAS_HORA = 30, ESPACO_MINIMO = 300 * 1024 * 1024;
+const LIMITE_ENVIOS_HORA = 200, LIMITE_ALERTAS_HORA = 30, MB = 1024 * 1024;
+/* espaço do volume: a reserva é proporcional ao tamanho (10%, entre 30 MB e 300 MB).
+   Antes era fixa em 300 MB e travava os envios cedo demais em volumes pequenos (ex.: 500 MB). */
+function espaco(env) {
+  const livre = typeof env.espacoLivre === "function" ? env.espacoLivre() : null;
+  const total = typeof env.espacoTotal === "function" ? env.espacoTotal() : null;
+  if (livre == null) return null;
+  const reserva = total ? Math.min(300 * MB, Math.max(30 * MB, total * 0.1)) : 30 * MB;
+  return { livre, total, reserva, livreMB: Math.round(livre / MB), totalMB: total ? Math.round(total / MB) : null, reservaMB: Math.round(reserva / MB),
+    pctLivre: total ? Math.round(livre / total * 100) : null };
+}
 function semEspaco(env) {
-  if (typeof env.espacoLivre !== "function") return false;
-  const livre = env.espacoLivre();
-  if (livre != null && livre < ESPACO_MINIMO) { console.error(`[armazenamento] só ${Math.round(livre / 1048576)} MB livres; envios recusados`); return true; }
+  const e = espaco(env);
+  if (e && e.livre < e.reserva) { console.error(`[armazenamento] só ${e.livreMB} MB livres de ${e.totalMB} MB; envios recusados`); return true; }
   return false;
 }
 const umaHoraAtras = () => new Date(Date.now() - 3600e3).toISOString();
@@ -1371,7 +1384,7 @@ const BLOQUEADOS = /^\/(LEIA-ME|README|schema)\b|\.md$|\.sql$/i;
 /* Diagnóstico: /api/status (não mostra dados, só se as peças estão ligadas) */
 async function status(env, request) {
   const o = origemIP(request, limpaIP);
-  const r = { ip_desta_conexao: `${o.ip} (fonte: ${o.fonte})`, cabecalho_x_forwarded_for: o.xff || "(vazio)", cabecalho_x_real_ip: o.xRealIp || "(vazio)", servidor: "ok", armazenamento: env.ARMAZENAMENTO || "", banco_DB: "", arquivos_FILES: "", leitor_pdf_servidor: typeof env.lerPDF === "function" && env.LeituraNF ? "ok" : "indisponível", senha_admin: env.ADMIN_PASSWORD ? "definida (ADMIN_PASSWORD)" : (await senhaAdminGuardada(env)) ? "criada no sistema (hash no banco)" : "padrão (admin) — troca obrigatória no próximo login", hora_servidor: agoraISO(), espaco_livre: typeof env.espacoLivre === "function" && env.espacoLivre() != null ? `${Math.round(env.espacoLivre() / 1048576)} MB` : "não medido" };
+  const r = { ip_desta_conexao: `${o.ip} (fonte: ${o.fonte})`, cabecalho_x_forwarded_for: o.xff || "(vazio)", cabecalho_x_real_ip: o.xRealIp || "(vazio)", servidor: "ok", armazenamento: env.ARMAZENAMENTO || "", banco_DB: "", arquivos_FILES: "", leitor_pdf_servidor: typeof env.lerPDF === "function" && env.LeituraNF ? "ok" : "indisponível", senha_admin: env.ADMIN_PASSWORD ? "definida (ADMIN_PASSWORD)" : (await senhaAdminGuardada(env)) ? "criada no sistema (hash no banco)" : "padrão (admin) — troca obrigatória no próximo login", hora_servidor: agoraISO(), espaco_livre: (e => e ? `${e.livreMB} MB livres de ${e.totalMB ?? "?"} MB (${e.pctLivre ?? "?"}% livre; envios param abaixo de ${e.reservaMB} MB)` : "não medido")(espaco(env)) };
   if (!env.DB || typeof env.DB.prepare !== "function") r.banco_DB = "indisponível";
   else {
     try { await preparar({ ...env, FILES: env.FILES && typeof env.FILES.put === "function" ? env.FILES : { put() {} } }); const n = await env.DB.prepare("SELECT COUNT(*) AS n FROM postos").first(); r.banco_DB = `ok (${n.n} posto(s) cadastrado(s))`; }
